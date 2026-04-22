@@ -1,5 +1,10 @@
 """
 controls_panel.py — QDockWidget que agrupa los controles laterales.
+
+Correcciones:
+  - Checkboxes de display modes (Persistence/Average/Envelope) ahora mutuamente excluyentes.
+  - Rate combo limitado a valores alcanzables por ESP32-S3 (max 160 kHz).
+  - Boton HOLD/STOP con estado independiente del hardware stream.
 """
 
 from PyQt6.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -10,9 +15,10 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from .channel_panel import ChannelPanel
 from .trigger_panel import TriggerPanel
 
+
 class ControlsPanel(QDockWidget):
 
-    # Señales para notificar al MainWindow
+    # Senales para notificar al MainWindow
     connect_requested = pyqtSignal(str)
     disconnect_requested = pyqtSignal()
     start_stream_requested = pyqtSignal()
@@ -20,13 +26,13 @@ class ControlsPanel(QDockWidget):
     single_shot_requested = pyqtSignal()
     auto_scale_requested = pyqtSignal()
     refresh_ports_requested = pyqtSignal()
-    theme_toggle_requested = pyqtSignal(str)  # 'dark' or 'light'
+    theme_toggle_requested = pyqtSignal(str)
 
-    mode_changed = pyqtSignal(int)          # 0=single, 1=dual, 2=oversample
+    mode_changed = pyqtSignal(int)
     rate_changed = pyqtSignal(int)
     frame_size_changed = pyqtSignal(int)
-    timebase_changed = pyqtSignal(float)    # us/div
-    display_mode_changed = pyqtSignal(str)  # YT, XY, FFT, YT+FFT
+    timebase_changed = pyqtSignal(float)
+    display_mode_changed = pyqtSignal(str)
     roll_mode_changed = pyqtSignal(bool)
     roll_paused_changed = pyqtSignal(bool)
 
@@ -38,6 +44,9 @@ class ControlsPanel(QDockWidget):
     fft_enabled_changed = pyqtSignal(int)
     fft_window_changed = pyqtSignal(str)
     fft_points_changed = pyqtSignal(int)
+
+    # NEW: UI Hold (freeze display without stopping hardware)
+    ui_hold_changed = pyqtSignal(bool)
 
     def __init__(self, title="Controls", parent=None):
         super().__init__(title, parent)
@@ -56,7 +65,7 @@ class ControlsPanel(QDockWidget):
 
         row_ports = QHBoxLayout()
         self.cb_ports = QComboBox()
-        self.btn_refresh = QPushButton("↻")
+        self.btn_refresh = QPushButton("r")
         self.btn_refresh.setFixedWidth(30)
         self.btn_refresh.setToolTip("Refresh serial ports")
         row_ports.addWidget(self.cb_ports)
@@ -87,11 +96,11 @@ class ControlsPanel(QDockWidget):
         row_mode.addWidget(self.cb_mode)
         l_acq.addLayout(row_mode)
 
-        # Rate
+        # Rate (BUG-M03 FIX: eliminados 320000 y 640000)
         row_rate = QHBoxLayout()
         row_rate.addWidget(QLabel("Rate:"))
         self.cb_rate = QComboBox()
-        rates = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 125000, 160000, 320000, 640000]
+        rates = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 125000, 160000]
         for r in rates:
             if r >= 1000:
                 self.cb_rate.addItem(f"{r//1000} kHz", r)
@@ -111,7 +120,7 @@ class ControlsPanel(QDockWidget):
         row_frame.addWidget(self.cb_frame)
         l_acq.addLayout(row_frame)
 
-        # Timebase (us/div)
+        # Timebase
         row_tb = QHBoxLayout()
         row_tb.addWidget(QLabel("T/div:"))
         self.cb_timebase = QComboBox()
@@ -126,8 +135,8 @@ class ControlsPanel(QDockWidget):
             elif t >= 1000:
                 self.cb_timebase.addItem(f"{t/1000:.1f} ms", float(t))
             else:
-                self.cb_timebase.addItem(f"{t} µs", float(t))
-        self.cb_timebase.setCurrentIndex(12)  # 10ms default
+                self.cb_timebase.addItem(f"{t} us", float(t))
+        self.cb_timebase.setCurrentIndex(12)
         row_tb.addWidget(self.cb_timebase)
         l_acq.addLayout(row_tb)
 
@@ -145,7 +154,7 @@ class ControlsPanel(QDockWidget):
         l_acq.addLayout(row_run)
 
         # Auto-Scale
-        self.btn_autoscale = QPushButton("⟲ AUTO SCALE")
+        self.btn_autoscale = QPushButton(" AUTO SCALE")
         self.btn_autoscale.setObjectName("btn_autoscale")
         self.btn_autoscale.setToolTip("Auto-fit voltage scale and timebase to the current signal")
         l_acq.addWidget(self.btn_autoscale)
@@ -183,15 +192,17 @@ class ControlsPanel(QDockWidget):
         row_dmode.addWidget(self.cb_disp_mode)
         l_disp.addLayout(row_dmode)
 
-        # Modos visuales extra
+        # Roll mode
         self.chk_roll = QCheckBox("Roll Mode (Continuous)")
         self.chk_pause_roll = QCheckBox("Pause Roll")
-        self.chk_pause_roll.setEnabled(False)  # Only enabled if Roll Mode is checked
+        self.chk_pause_roll.setEnabled(False)
+        l_disp.addWidget(self.chk_roll)
+        l_disp.addWidget(self.chk_pause_roll)
+
+        # BUG-M05 FIX: Checkboxes mutuamente excluyentes
         self.chk_pers = QCheckBox("Persistence")
         self.chk_avg = QCheckBox("Average (n=4)")
         self.chk_env = QCheckBox("Envelope")
-        l_disp.addWidget(self.chk_roll)
-        l_disp.addWidget(self.chk_pause_roll)
         l_disp.addWidget(self.chk_pers)
         l_disp.addWidget(self.chk_avg)
         l_disp.addWidget(self.chk_env)
@@ -219,7 +230,7 @@ class ControlsPanel(QDockWidget):
         # Spacer final
         self.layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
-        # Wrap everything in a QScrollArea
+        # Wrap in QScrollArea
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -244,16 +255,30 @@ class ControlsPanel(QDockWidget):
         self.chk_roll.toggled.connect(self.chk_pause_roll.setEnabled)
         self.chk_pause_roll.toggled.connect(self.roll_paused_changed.emit)
 
+        # BUG-M05: Mutual exclusion para display modes
+        self.chk_pers.toggled.connect(lambda checked: self._uncheck_others(self.chk_pers, checked))
+        self.chk_avg.toggled.connect(lambda checked: self._uncheck_others(self.chk_avg, checked))
+        self.chk_env.toggled.connect(lambda checked: self._uncheck_others(self.chk_env, checked))
+
         self.chk_cursor_t.toggled.connect(self.time_cursors_toggled.emit)
         self.chk_cursor_v.toggled.connect(self.volt_cursors_toggled.emit)
 
         self.btn_theme_dark.clicked.connect(lambda: self.theme_toggle_requested.emit('dark'))
         self.btn_theme_light.clicked.connect(lambda: self.theme_toggle_requested.emit('light'))
 
-        # Auto-refresh ports timer
+        # Auto-refresh ports
         self._port_timer = QTimer(self)
         self._port_timer.timeout.connect(self.refresh_ports_requested.emit)
         self._port_timer.start(2000)
+
+    def _uncheck_others(self, source: QCheckBox, checked: bool):
+        """Mutual exclusion: cuando un display mode se activa, desactiva los otros."""
+        if checked:
+            for chk in (self.chk_pers, self.chk_avg, self.chk_env):
+                if chk is not source and chk.isChecked():
+                    chk.blockSignals(True)
+                    chk.setChecked(False)
+                    chk.blockSignals(False)
 
     def _on_connect_clicked(self, checked: bool):
         if checked:

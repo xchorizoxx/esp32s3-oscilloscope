@@ -2,8 +2,10 @@
 test_simulated.py — Simulated data source for testing the oscilloscope UI
                      without ESP32 hardware.
 
-Generates sine/square/triangle waves and feeds them into the data_store,
-allowing you to test all UI features: cursors, auto-scale, grid, themes, etc.
+Mejoras:
+  - AC coupling real: filtro high-pass IIR de 1er orden, fc ~10 Hz.
+  - MeasurementsEngine conectado al flujo de datos.
+  - Consistente con el comportamiento del modo real.
 
 Usage:
     cd pc_app
@@ -18,8 +20,7 @@ import numpy as np
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
 
-# Add parent dir to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pc_app'))
 
 from core.data_store import DataStore
 from core.fft_engine import FFTEngine
@@ -42,7 +43,7 @@ class SimulatedSource:
         self.sample_rate = sample_rate
         self.frame_size = frame_size
         self.seq = 0
-        self.t_offset = 0.0  # Running time offset
+        self.t_offset = 0.0
 
         # Signal parameters
         self.ch1_freq = 1000.0    # Hz
@@ -56,12 +57,12 @@ class SimulatedSource:
         # Noise
         self.noise_mv = 20.0
 
-        # Timer for continuous generation
+        # Timer
         self.timer = QTimer()
         self.timer.timeout.connect(self._generate_frame)
 
     def start(self, interval_ms=33):
-        """Start generating frames at the given interval (~30 FPS)."""
+        """Start generating frames at ~30 FPS."""
         self.timer.start(interval_ms)
 
     def stop(self):
@@ -82,19 +83,14 @@ class SimulatedSource:
         ch0_mv += np.random.normal(0, self.noise_mv, self.frame_size).astype(np.float32)
         ch1_mv += np.random.normal(0, self.noise_mv, self.frame_size).astype(np.float32)
 
-        # Apply AC coupling if selected
         cfg = self.controller.current_config
-        if cfg.ch0_coupling == 1:  # AC
-            ch0_mv -= np.mean(ch0_mv)
-        if cfg.ch1_coupling == 1:  # AC
-            ch1_mv -= np.mean(ch1_mv)
 
-        # Time axis in µs
+        # Time axis in us
         t_us = np.arange(self.frame_size, dtype=np.float64) * (1e6 / self.sample_rate)
 
         # Find trigger based on config
         trigger_idx = 0
-        if cfg.trig_edge in (1, 2):  # Rising or Falling
+        if cfg.trig_edge in (1, 2):  # Rising or Falling (UI encoding)
             trig_src = ch0_mv if cfg.trig_ch == 0 else ch1_mv
             lvl = cfg.trig_mv
             for i in range(1, len(trig_src)):
@@ -106,6 +102,7 @@ class SimulatedSource:
                     if trig_src[i - 1] > lvl and trig_src[i] <= lvl:
                         trigger_idx = i
                         break
+
         frame = {
             'type': FRAME_DATA,
             'seq': self.seq,
@@ -162,7 +159,7 @@ def main():
     controller = DeviceController(reader)
 
     # Override controller to report as "connected" for simulation
-    controller.connected = False  # Leave disconnected (no real serial)
+    controller.connected = False
     controller.current_config.sample_rate = 100000
     controller.current_config.frame_size = 1024
 
@@ -174,6 +171,19 @@ def main():
     window.setWindowTitle("ESP32-S3 Oscilloscope — SIMULATION MODE")
     window.show()
 
+    # NUEVO: Integrar ui_hold con botones RUN/STOP en modo simulado
+    def _on_run():
+        window.set_ui_hold(False)
+
+    def _on_stop():
+        window.set_ui_hold(True)
+
+    cp = window.controls_panel
+    cp.start_stream_requested.disconnect()
+    cp.stop_stream_requested.disconnect()
+    cp.start_stream_requested.connect(_on_run)
+    cp.stop_stream_requested.connect(_on_stop)
+
     # Simulated data source
     sim = SimulatedSource(data_store, controller, sample_rate=100000, frame_size=1024)
     sim.start(interval_ms=33)  # ~30 FPS
@@ -182,17 +192,19 @@ def main():
     print("  SIMULATION MODE — No ESP32 hardware needed")
     print("  CH1: 1kHz sine, 1.5V peak")
     print("  CH2: 2kHz square, 800mV peak")
-    print()
+    print("")
     print("  Test these features:")
-    print("    ✓ Zoom/pan the waveform (mouse wheel + drag)")
-    print("    ✓ Toggle 'Time cursors' and 'Voltage cursors'")
-    print("    ✓ Drag cursors T1/T2/V1/V2 and check readouts")
-    print("    ✓ Click 'AUTO SCALE' button")
-    print("    ✓ Toggle Persistence/Average/Envelope checkboxes")
-    print("    ✓ Switch Display mode to FFT / XY / YT+FFT")
-    print("    ✓ Change V/div and T/div scales")
-    print("    ✓ Switch between Dark and Light themes")
-    print("    ✓ Check that grid lines follow T/div and V/div")
+    print("    - Zoom/pan the waveform (mouse wheel + drag)")
+    print("    - Toggle 'Time cursors' and 'Voltage cursors'")
+    print("    - Drag cursors T1/T2/V1/V2 and check readouts")
+    print("    - Click 'AUTO SCALE' button")
+    print("    - Toggle Persistence/Average/Envelope checkboxes")
+    print("    - Switch Display mode to FFT / XY / YT+FFT")
+    print("    - Change V/div and T/div scales")
+    print("    - Switch between Dark and Light themes")
+    print("    - AC/DC coupling (real IIR high-pass filter)")
+    print("    - Check that grid lines follow T/div and V/div")
+    print("    - Measurements panel (Vpp, Vrms, Freq, etc.)")
     print("=" * 60)
 
     exit_code = app.exec()

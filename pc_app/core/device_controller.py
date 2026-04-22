@@ -1,5 +1,12 @@
 """
-device_controller.py — Gestión del estado del device y envío de comandos serializados.
+device_controller.py — Gestion del estado del device y envio de comandos serializados.
+
+Mejoras:
+  - Validacion de parametros antes de enviar (ValueError con mensaje claro).
+  - Mapeo correcto de trigger edge entre UI y firmware.
+  - Pre-trigger: conversion de porcentaje a samples.
+  - AC coupling: solo estado local (el firmware no lo soporta).
+  - Sincronizacion automatica de estado al conectar via CMD_GET_CAPS.
 """
 
 import threading
@@ -10,33 +17,59 @@ import serial.tools.list_ports
 from PyQt6.QtCore import QObject, pyqtSignal
 from .serial_reader import SerialReader
 
+# ---------------------------------------------------------------------------
+# Validacion — limites del protocolo y del ESP32-S3
+# ---------------------------------------------------------------------------
+
+# Sample rate en Hz (limites segun protocolo + ADC clock hack del ESP32-S3)
+MIN_SAMPLE_RATE = 611
+MAX_SAMPLE_RATE = 160000  # Con CLOCK_HACK; el INFO frame del firmware puede reportar menos
+
+# Frame sizes validos segun protocolo
+VALID_FRAME_SIZES = [64, 128, 256, 512, 1024, 2048, 4096]
+
+# Attenuation indices validos (0=0dB, 1=2.5dB, 2=6dB, 3=12dB)
+VALID_ATTEN_INDICES = [0, 1, 2, 3]
+
+# Modos validos
+VALID_MODES = [0, 1, 2]  # 0=single, 1=dual, 2=oversample
+
+# Mapeo de trigger edge: UI -> Firmware
+# UI: 0=None, 1=Rising, 2=Falling, 3=Any
+# Firmware: 0=RISE, 1=FALL, 2=ANY, 3=NONE
+_EDGE_UI_TO_FW = {0: 3, 1: 0, 2: 1, 3: 2}
+_EDGE_FW_TO_UI = {3: 0, 0: 1, 1: 2, 2: 3}
+
+
 @dataclass
 class OscConfig:
-    mode: int = 1         # 0=single, 1=dual, 2=oversample
+    """Configuracion local que refleja (lo mejor posible) el estado del firmware."""
+    mode: int = 1              # 0=single, 1=dual, 2=oversample
     sample_rate: int = 100000
     frame_size: int = 1024
     fft_enabled: int = 0
     trig_ch: int = 0
     trig_mv: float = 0.0
-    trig_edge: int = 0    # 0=none, 1=rising, 2=falling, 3=any
-    pre_trig_pct: int = 0
-    ch0_atten: int = 0
-    ch1_atten: int = 0
-    ch0_coupling: int = 0 # 0=DC, 1=AC
-    ch1_coupling: int = 0
+    trig_edge: int = 1        # UI encoding: 0=none, 1=rising, 2=falling, 3=any
+    pre_trig_pct: int = 50    # Porcentaje (0-100), se convierte a samples para el firmware
+    ch0_atten_idx: int = 3     # 0=0dB, 1=2.5dB, 2=6dB, 3=12dB (default 12dB)
+    ch1_atten_idx: int = 3
+    ch0_coupling: str = "AC+DC"      # Modos locales: AC+DC, AC, DC, GND
+    ch1_coupling: str = "AC+DC"
+
 
 class DeviceController(QObject):
     """
-    Controlador que maneja el envío de comandos ASCII al osciloscopio
+    Controlador que maneja el envio de comandos ASCII al osciloscopio
     y mantiene el estado conocido del dispositivo.
     """
-    # Señal emitida cuando hay un cambio en el estado local de configuración
     config_changed = pyqtSignal()
 
     def __init__(self, reader: SerialReader, parent=None) -> None:
         super().__init__(parent)
         self.reader = reader
         self.connected: bool = False
+        self.port_name: str = ""
         self.firmware_version: str = "Unknown"
         self.max_sample_rate: int = 0
         self.max_frame_size: int = 0
@@ -48,16 +81,21 @@ class DeviceController(QObject):
         self._ack_event = threading.Event()
         self._nak_reason: str = ""
 
-        # Conectar señales del reader para interceptar info y acks
+        # Conectar senales del reader
         self.reader.info_received.connect(self._on_info)
         self.reader.ack_received.connect(self._on_ack)
         self.reader.nak_received.connect(self._on_nak)
         self.reader.connection_changed.connect(self._on_connection_changed)
 
+    # ------------------------------------------------------------------
+    # Conexion / desconexion
+    # ------------------------------------------------------------------
+
     def connect_device(self, port: str, baudrate: int = 115200) -> bool:
-        """Inicia la conexión. Retorna False si ya está conectado."""
+        """Inicia la conexion. Retorna False si ya esta conectado."""
         if self.connected:
             return False
+        self.port_name = port
         self.reader.start_reading(port, baudrate)
         return True
 
@@ -79,7 +117,6 @@ class DeviceController(QObject):
         self.capabilities = info
 
     def _on_ack(self, cmd: str) -> None:
-        # Extraemos el comando base (antes del primer espacio si lo hay)
         base_cmd = cmd.split(' ')[0] if cmd else ''
         if base_cmd == self._pending_ack:
             self._ack_event.set()
@@ -88,21 +125,35 @@ class DeviceController(QObject):
         base_cmd = cmd.split(' ')[0] if cmd else ''
         if base_cmd == self._pending_ack:
             self._nak_reason = reason
-            self._ack_event.set() # Desbloqueamos pero marcaremos como fallo
+            self._ack_event.set()
 
-    def _on_connection_changed(self, connected: bool) -> None:
+    def _on_connection_changed(self, connected: bool, port: str = "") -> None:
+        was_connected = self.connected
         self.connected = connected
+        if connected and not was_connected:
+            # Sincronizar estado al conectar
+            QTimer = __import__('PyQt6.QtCore', fromlist=['QTimer']).QTimer
+            QTimer.singleShot(500, self._sync_state_on_connect)
         if not connected:
             self.firmware_version = "Unknown"
+            self.port_name = ""
+
+    def _sync_state_on_connect(self) -> None:
+        """Lee capabilities del firmware y sincroniza la UI."""
+        if not self.connected:
+            return
+        self.get_caps()
+        # La senal info_received actualizara max_sample_rate, etc.
+        self.config_changed.emit()
 
     # ------------------------------------------------------------------
-    # Envío de comandos sincronizado
+    # Envio de comandos sincronizado
     # ------------------------------------------------------------------
 
     def _send_command(self, cmd_string: str, wait_ack: bool = True) -> Tuple[bool, str]:
         """
-        Envía un comando ASCII y espera el ACK.
-        Retorna (True, "") si fue exitoso, o (False, "razón") si falló.
+        Envia un comando ASCII y espera el ACK.
+        Retorna (True, "") si fue exitoso, o (False, "razon") si fallo.
         """
         if not self.connected:
             return False, "Not connected"
@@ -114,7 +165,6 @@ class DeviceController(QObject):
             self._nak_reason = ""
             self._ack_event.clear()
 
-            # Añadir newline al final como requiere el protocolo
             full_cmd = cmd_string.strip() + '\n'
             success = self.reader.send_bytes(full_cmd.encode('utf-8'))
 
@@ -123,7 +173,6 @@ class DeviceController(QObject):
                 return False, "Serial write error"
 
             if wait_ack:
-                # Esperar hasta 2 segundos
                 signaled = self._ack_event.wait(timeout=2.0)
                 self._pending_ack = None
 
@@ -136,7 +185,7 @@ class DeviceController(QObject):
             return True, ""
 
     # ------------------------------------------------------------------
-    # Métodos de control específicos
+    # Metodos de control especificos (con validacion)
     # ------------------------------------------------------------------
 
     def get_caps(self) -> bool:
@@ -156,6 +205,8 @@ class DeviceController(QObject):
         return ok
 
     def set_mode(self, mode: int) -> bool:
+        if mode not in VALID_MODES:
+            raise ValueError(f"Modo invalido: {mode}. Validos: {VALID_MODES}")
         ok, err = self._send_command(f"CMD_SET_MODE {mode}")
         if ok:
             self.current_config.mode = mode
@@ -163,39 +214,73 @@ class DeviceController(QObject):
         return ok
 
     def set_sample_rate(self, hz: int) -> bool:
+        if not (MIN_SAMPLE_RATE <= hz <= MAX_SAMPLE_RATE):
+            raise ValueError(
+                f"Sample rate invalido: {hz} Hz. "
+                f"Rango valido: {MIN_SAMPLE_RATE} - {MAX_SAMPLE_RATE} Hz"
+            )
         ok, err = self._send_command(f"CMD_SET_RATE {hz}")
         if ok:
             self.current_config.sample_rate = hz
             self.config_changed.emit()
         return ok
 
-    def set_trigger(self, ch: int, mv: float, edge: int) -> bool:
-        ok, err = self._send_command(f"CMD_SET_TRIG {ch} {mv:.1f} {edge}")
+    def set_trigger(self, ch: int, mv: float, edge_ui: int) -> bool:
+        """
+        Configura el trigger.
+        edge_ui: 0=none, 1=rising, 2=falling, 3=any
+        Se mapea internamente al encoding del firmware.
+        """
+        if ch not in (0, 1):
+            raise ValueError(f"Canal de trigger invalido: {ch}. Use 0 o 1.")
+        if edge_ui not in _EDGE_UI_TO_FW:
+            raise ValueError(f"Edge invalido: {edge_ui}. Validos: 0=none, 1=rising, 2=falling, 3=any")
+
+        edge_fw = _EDGE_UI_TO_FW[edge_ui]
+        ok, err = self._send_command(f"CMD_SET_TRIG {ch} {mv:.1f} {edge_fw}")
         if ok:
             self.current_config.trig_ch = ch
             self.current_config.trig_mv = mv
-            self.current_config.trig_edge = edge
+            self.current_config.trig_edge = edge_ui
             self.config_changed.emit()
         return ok
 
-    def set_attenuation(self, ch: int, db: int) -> bool:
-        ok, err = self._send_command(f"CMD_SET_ATTEN {ch} {db}")
+    def set_attenuation(self, ch: int, atten_idx: int) -> bool:
+        """
+        Configura la atenuacion del canal.
+        atten_idx: 0=0dB, 1=2.5dB, 2=6dB, 3=12dB
+        """
+        if atten_idx not in VALID_ATTEN_INDICES:
+            raise ValueError(
+                f"Indice de atenuacion invalido: {atten_idx}. "
+                f"Validos: {VALID_ATTEN_INDICES} (0=0dB, 1=2.5dB, 2=6dB, 3=12dB)"
+            )
+        ok, err = self._send_command(f"CMD_SET_ATTEN {ch} {atten_idx}")
         if ok:
-            if ch == 0: self.current_config.ch0_atten = db
-            else: self.current_config.ch1_atten = db
+            if ch == 0:
+                self.current_config.ch0_atten_idx = atten_idx
+            else:
+                self.current_config.ch1_atten_idx = atten_idx
             self.config_changed.emit()
         return ok
 
     def set_coupling(self, ch: int, coupling: str) -> bool:
-        cpl_val = 1 if coupling.upper() == "AC" else 0
-        ok, err = self._send_command(f"CMD_SET_CPL {ch} {cpl_val}")
-        if ok:
-            if ch == 0: self.current_config.ch0_coupling = cpl_val
-            else: self.current_config.ch1_coupling = cpl_val
-            self.config_changed.emit()
-        return ok
+        """
+        AC/DC coupling es SOLO local (software). El firmware NO soporta este comando.
+        """
+        # No enviamos comando al firmware — CMD_SET_CPL no existe en el protocolo
+        if ch == 0:
+            self.current_config.ch0_coupling = coupling
+        else:
+            self.current_config.ch1_coupling = coupling
+        self.config_changed.emit()
+        return True
 
     def set_frame_size(self, n: int) -> bool:
+        if n not in VALID_FRAME_SIZES:
+            raise ValueError(
+                f"Frame size invalido: {n}. Validos: {VALID_FRAME_SIZES}"
+            )
         ok, err = self._send_command(f"CMD_SET_FRAME {n}")
         if ok:
             self.current_config.frame_size = n
@@ -203,13 +288,27 @@ class DeviceController(QObject):
         return ok
 
     def set_pre_trigger(self, pct: int) -> bool:
-        ok, err = self._send_command(f"CMD_SET_PRE_TRIG {pct}")
+        """
+        Convierte porcentaje (0-100) a samples antes de enviar al firmware.
+        El firmware espera: 0 to frame_size/2 samples.
+        """
+        if not (0 <= pct <= 100):
+            raise ValueError(f"Pre-trigger invalido: {pct}%. Rango: 0-100")
+
+        # Convertir porcentaje a samples
+        max_samples = self.current_config.frame_size // 2
+        samples = int(pct * max_samples / 100)
+        samples = max(0, min(samples, max_samples))
+
+        ok, err = self._send_command(f"CMD_SET_PRE_TRIG {samples}")
         if ok:
             self.current_config.pre_trig_pct = pct
             self.config_changed.emit()
         return ok
 
     def set_fft_enabled(self, en: int) -> bool:
+        if en not in (0, 1):
+            raise ValueError(f"FFT enabled invalido: {en}. Use 0 o 1.")
         ok, err = self._send_command(f"CMD_SET_FFT {en}")
         if ok:
             self.current_config.fft_enabled = en

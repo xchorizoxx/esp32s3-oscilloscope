@@ -1,5 +1,7 @@
 """
-main.py — Punto de entrada de la aplicación Python del osciloscopio ESP32.
+main.py — Punto de entrada de la aplicacion Python del osciloscopio ESP32.
+
+Integra ui_hold: STOP congela la visualizacion, RUN la descongela.
 """
 
 import sys
@@ -13,6 +15,7 @@ from core.frame_parser import FrameParser
 from core.serial_reader import SerialReader
 from core.device_controller import DeviceController
 from ui.main_window import MainWindow
+
 
 def main():
     app = QApplication(sys.argv)
@@ -28,7 +31,7 @@ def main():
     except Exception as e:
         print(f"Warning: Could not load stylesheet: {e}")
 
-    # Inicializar módulos core
+    # Inicializar modulos core
     data_store  = DataStore(capacity=1000)
     fft_engine  = FFTEngine()
     meas_engine = MeasurementsEngine()
@@ -47,6 +50,24 @@ def main():
     window = MainWindow(controller, reader, data_store, fft_engine, meas_engine)
     window.show()
 
+    # NUEVO: Integrar ui_hold con botones RUN/STOP
+    # STOP = congela UI + detiene stream del firmware
+    # RUN = descongela UI + inicia stream del firmware
+    def _on_run():
+        window.set_ui_hold(False)
+        controller.start_stream()
+
+    def _on_stop():
+        window.set_ui_hold(True)
+        controller.stop_stream()
+
+    # Reconectar las senales de los botones para incluir ui_hold
+    cp = window.controls_panel
+    cp.start_stream_requested.disconnect()
+    cp.stop_stream_requested.disconnect()
+    cp.start_stream_requested.connect(_on_run)
+    cp.stop_stream_requested.connect(_on_stop)
+
     # Ejecutar loop de UI
     exit_code = app.exec()
 
@@ -55,6 +76,7 @@ def main():
     controller.disconnect_device()
 
     sys.exit(exit_code)
+
 
 if __name__ == "__main__":
     main()

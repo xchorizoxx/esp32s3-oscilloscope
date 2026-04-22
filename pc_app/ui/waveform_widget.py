@@ -1,17 +1,15 @@
 """
 waveform_widget.py — Widget PyQtGraph de waveform dual channel.
 
-Features:
-  - Dynamic infinite grid that recalculates on zoom/pan
-  - Draggable measurement cursors (T1/T2 for time, V1/V2 for voltage)
-  - Ground reference indicators (draggable triangles on left edge)
-  - Persistence, average, and envelope display modes
-  - Future-ready for programmable gain amplifier (PGA) scaling
+Correcciones:
+  - Roll mode: proteccion contra arrays vacios (IndexError).
+  - Persistence: frames asignados en orden correcto (newest = alpha mas alto).
+  - Offset temporal determinista en roll mode.
 """
 
 import pyqtgraph as pg
 import numpy as np
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QFont
 
@@ -20,7 +18,7 @@ class WaveformWidget(QWidget):
 
     cursor_moved = pyqtSignal(float, float)  # x_us, y_mv
 
-    # Colors
+    # Colors — CH1 = indice 0, CH2 = indice 1
     CH1_COLOR = '#22d3ee'   # Cyan for CH1
     CH2_COLOR = '#facc15'   # Yellow for CH2
     GRID_MAJOR = '#27272a'
@@ -40,15 +38,15 @@ class WaveformWidget(QWidget):
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground(self.BG_COLOR)
-        self.plot_widget.showGrid(x=False, y=False)  # We draw our own dynamic grid
+        self.plot_widget.showGrid(x=False, y=False)
 
         self.plot_item = self.plot_widget.getPlotItem()
         self.plot_item.setMouseEnabled(x=True, y=True)
         self.plot_item.hideButtons()
 
-        # Axis labels
-        self.plot_item.setLabel('bottom', 'Time', units='s', unitPrefix='µ')
-        self.plot_item.setLabel('left', 'Voltage', units='V', unitPrefix='m')
+        # Axis labels (disabled auto SI prefixes to prevent kV and ks since data is in mV and µs)
+        self.plot_item.setLabel('bottom', 'Time (µs)')
+        self.plot_item.setLabel('left', 'Voltage (mV)')
 
         main_layout.addWidget(self.plot_widget)
 
@@ -61,11 +59,11 @@ class WaveformWidget(QWidget):
 
         self.lbl_t1 = QLabel("T1: --")
         self.lbl_t2 = QLabel("T2: --")
-        self.lbl_dt = QLabel("ΔT: --")
-        self.lbl_freq = QLabel("1/ΔT: --")
+        self.lbl_dt = QLabel("dT: --")
+        self.lbl_freq = QLabel("1/dT: --")
         self.lbl_v1 = QLabel("V1: --")
         self.lbl_v2 = QLabel("V2: --")
-        self.lbl_dv = QLabel("ΔV: --")
+        self.lbl_dv = QLabel("dV: --")
 
         for lbl in [self.lbl_t1, self.lbl_t2, self.lbl_dt, self.lbl_freq,
                      self.lbl_v1, self.lbl_v2, self.lbl_dv]:
@@ -117,7 +115,7 @@ class WaveformWidget(QWidget):
         )
         self.plot_item.addItem(self.trig_line)
 
-        # --- Ground reference indicators (triangles at left edge) ---
+        # --- Ground reference indicators ---
         self.gnd_marker_ch1 = pg.ArrowItem(
             angle=0, tipAngle=60, headLen=10, headWidth=8,
             pen=pg.mkPen(self.CH1_COLOR, width=1),
@@ -131,9 +129,9 @@ class WaveformWidget(QWidget):
         self.plot_item.addItem(self.gnd_marker_ch1)
         self.plot_item.addItem(self.gnd_marker_ch2)
 
-        # --- Dynamic grid lines (pre-allocated pool for performance) ---
-        self._grid_v_lines = []  # Vertical (time axis)
-        self._grid_h_lines = []  # Horizontal (voltage axis)
+        # --- Dynamic grid lines (pre-allocated pool) ---
+        self._grid_v_lines = []
+        self._grid_h_lines = []
         _POOL_V = 30
         _POOL_H = 20
 
@@ -149,20 +147,20 @@ class WaveformWidget(QWidget):
             self.plot_item.addItem(line, ignoreBounds=True)
             self._grid_h_lines.append(line)
 
-        # Zero-axis lines (always visible, solid, brighter)
+        # Zero-axis lines
         self._zero_x = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#3f3f46', width=1))
         self._zero_y = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#3f3f46', width=1))
         self.plot_item.addItem(self._zero_x, ignoreBounds=True)
         self.plot_item.addItem(self._zero_y, ignoreBounds=True)
 
-        # Debounce timer for grid updates (prevents lag on rapid zoom/pan)
+        # Debounce timer for grid updates
         from PyQt6.QtCore import QTimer as _QT
         self._grid_timer = _QT(self)
         self._grid_timer.setSingleShot(True)
-        self._grid_timer.setInterval(30)  # 30ms debounce
+        self._grid_timer.setInterval(30)
         self._grid_timer.timeout.connect(self._draw_dynamic_grid)
 
-        # --- Measurement cursors (draggable) ---
+        # --- Measurement cursors ---
         self.cursor_t1 = pg.InfiniteLine(
             angle=90, movable=True,
             pen=pg.mkPen(self.CURSOR_COLOR_T, style=Qt.PenStyle.DashLine, width=1.5),
@@ -186,7 +184,7 @@ class WaveformWidget(QWidget):
 
         for c in [self.cursor_t1, self.cursor_t2, self.cursor_v1, self.cursor_v2]:
             self.plot_item.addItem(c)
-            c.setVisible(False)  # Hidden by default
+            c.setVisible(False)
             c.sigPositionChanged.connect(self._update_cursor_readout)
 
         self.cursors_time_visible = False
@@ -200,44 +198,35 @@ class WaveformWidget(QWidget):
         self.ch2_offset_mv = 0.0
         self.ch1_visible = True
         self.ch2_visible = True
-        self.display_mode = 'normal'  # 'normal', 'persistence', 'average', 'envelope'
+        self.display_mode = 'normal'
 
-        # Roll mode: continuously scroll the waveform as new data arrives
+        # Roll mode
         self.roll_mode = False
         self.roll_paused = False
-        self._roll_max_pts = 10000  # Max points to keep in rolling buffer
+        self._roll_max_pts = 10000
         self._roll_t_us = np.array([], dtype=np.float64)
         self._roll_ch1 = np.array([], dtype=np.float32)
         self._roll_ch2 = np.array([], dtype=np.float32)
-        self._roll_t_offset = 0.0  # Running time offset in µs
+        self._roll_t_offset = 0.0
+        self._last_dt_us = 10.0  # Deterministic fallback for delta
 
-        # Programmable Gain Amplifier (PGA) scale factors — future use
-        # When a hardware PGA is implemented, these factors convert
-        # raw ADC readings back to actual input voltage.
-        # Example: pga_gain=10 means ADC sees 10x the input, so divide by 10.
+        # PGA
         self.ch1_pga_gain = 1.0
         self.ch2_pga_gain = 1.0
 
-        # Connect view range changes for dynamic grid
+        # Connect view range changes
         self.plot_item.sigRangeChanged.connect(self._on_range_changed)
         self._update_ranges()
 
     # ==================================================================
-    # Dynamic Grid (pre-allocated pool, debounced)
+    # Dynamic Grid
     # ==================================================================
 
     def _on_range_changed(self, _view_box=None, _range=None):
-        """Schedule a debounced grid redraw when viewport changes."""
-        self._grid_timer.start()  # Restart the 30ms debounce timer
+        self._grid_timer.start()
         self._update_gnd_markers()
 
     def _draw_dynamic_grid(self):
-        """
-        Reposition pre-allocated grid lines using timebase/scale values.
-        Uses the configured T/div and V/div for consistent oscilloscope-style spacing.
-        When zoomed beyond default, falls back to a 1-2-5 sequence but keeps
-        both axes using the same visual spacing logic.
-        """
         vb = self.plot_item.getViewBox()
         x_range = vb.viewRange()[0]
         y_range = vb.viewRange()[1]
@@ -247,12 +236,9 @@ class WaveformWidget(QWidget):
         if x_span <= 0 or y_span <= 0:
             return
 
-        # Use the actual scope settings for grid spacing
         x_step = self.timebase_us
-        y_step = self.ch1_scale_mv  # Primary channel scale
+        y_step = self.ch1_scale_mv
 
-        # If user has zoomed significantly beyond the default view,
-        # snap to a nice 1-2-5 step so the grid doesn't get too dense/sparse
         visible_x_divs = x_span / x_step
         visible_y_divs = y_span / y_step
 
@@ -261,26 +247,23 @@ class WaveformWidget(QWidget):
         if visible_y_divs > 20 or visible_y_divs < 3:
             y_step = self._nice_step(y_span / 8.0)
 
-        # Vertical lines (time axis) — reposition from pool
         x_start = np.floor(x_range[0] / x_step) * x_step
         idx = 0
         x = x_start
         while x <= x_range[1] and idx < len(self._grid_v_lines):
-            if abs(x) > x_step * 0.001:  # Skip zero (handled by _zero_x)
+            if abs(x) > x_step * 0.001:
                 self._grid_v_lines[idx].setPos(x)
                 self._grid_v_lines[idx].setVisible(True)
                 idx += 1
             x += x_step
-        # Hide unused lines
         for i in range(idx, len(self._grid_v_lines)):
             self._grid_v_lines[i].setVisible(False)
 
-        # Horizontal lines (voltage axis)
         y_start = np.floor(y_range[0] / y_step) * y_step
         idx = 0
         y = y_start
         while y <= y_range[1] and idx < len(self._grid_h_lines):
-            if abs(y) > y_step * 0.001:  # Skip zero
+            if abs(y) > y_step * 0.001:
                 self._grid_h_lines[idx].setPos(y)
                 self._grid_h_lines[idx].setVisible(True)
                 idx += 1
@@ -290,7 +273,6 @@ class WaveformWidget(QWidget):
 
     @staticmethod
     def _nice_step(raw_step: float) -> float:
-        """Round a raw step size to the nearest 1-2-5 sequence value."""
         if raw_step <= 0:
             return 1.0
         magnitude = 10 ** np.floor(np.log10(raw_step))
@@ -309,7 +291,6 @@ class WaveformWidget(QWidget):
     # ==================================================================
 
     def _update_gnd_markers(self):
-        """Position the ground markers at the left edge of the current view."""
         vb = self.plot_item.getViewBox()
         x_range = vb.viewRange()[0]
         left_x = x_range[0]
@@ -331,19 +312,18 @@ class WaveformWidget(QWidget):
     # ==================================================================
 
     def _update_cursor_readout(self):
-        """Update the cursor labels when cursors are dragged."""
         if self.cursors_time_visible:
             t1 = self.cursor_t1.value()
             t2 = self.cursor_t2.value()
             dt = abs(t2 - t1)
             self.lbl_t1.setText(f"T1: {self._fmt_time(t1)}")
             self.lbl_t2.setText(f"T2: {self._fmt_time(t2)}")
-            self.lbl_dt.setText(f"ΔT: {self._fmt_time(dt)}")
+            self.lbl_dt.setText(f"dT: {self._fmt_time(dt)}")
             if dt > 0:
-                freq = 1e6 / dt  # dt is in µs, freq in Hz
-                self.lbl_freq.setText(f"1/ΔT: {self._fmt_freq(freq)}")
+                freq = 1e6 / dt
+                self.lbl_freq.setText(f"1/dT: {self._fmt_freq(freq)}")
             else:
-                self.lbl_freq.setText("1/ΔT: --")
+                self.lbl_freq.setText("1/dT: --")
 
         if self.cursors_volt_visible:
             v1 = self.cursor_v1.value()
@@ -351,7 +331,7 @@ class WaveformWidget(QWidget):
             dv = abs(v2 - v1)
             self.lbl_v1.setText(f"V1: {self._fmt_volt(v1)}")
             self.lbl_v2.setText(f"V2: {self._fmt_volt(v2)}")
-            self.lbl_dv.setText(f"ΔV: {self._fmt_volt(dv)}")
+            self.lbl_dv.setText(f"dV: {self._fmt_volt(dv)}")
 
     @staticmethod
     def _fmt_time(us: float) -> str:
@@ -360,7 +340,7 @@ class WaveformWidget(QWidget):
         elif abs(us) >= 1000:
             return f"{us/1000:.2f} ms"
         else:
-            return f"{us:.1f} µs"
+            return f"{us:.1f} us"
 
     @staticmethod
     def _fmt_volt(mv: float) -> str:
@@ -389,8 +369,8 @@ class WaveformWidget(QWidget):
         if not visible:
             self.lbl_t1.setText("T1: --")
             self.lbl_t2.setText("T2: --")
-            self.lbl_dt.setText("ΔT: --")
-            self.lbl_freq.setText("1/ΔT: --")
+            self.lbl_dt.setText("dT: --")
+            self.lbl_freq.setText("1/dT: --")
 
     def set_volt_cursors_visible(self, visible: bool):
         self.cursors_volt_visible = visible
@@ -399,33 +379,25 @@ class WaveformWidget(QWidget):
         if not visible:
             self.lbl_v1.setText("V1: --")
             self.lbl_v2.setText("V2: --")
-            self.lbl_dv.setText("ΔV: --")
+            self.lbl_dv.setText("dV: --")
 
     # ==================================================================
     # Public API — scale & visibility
     # ==================================================================
 
     def _update_ranges(self):
-        """
-        Set X and Y ranges so that grid cells are visually square.
-        Uses the viewport pixel aspect ratio to compute how many X divisions
-        to show for 8 Y divisions.
-        """
-        # Y: always 8 divisions (±4 divs from center)
         n_y_divs = 8
         y_max = (n_y_divs / 2) * self.ch1_scale_mv
 
-        # X: calculate divisions from viewport aspect ratio for square cells
         vb = self.plot_item.getViewBox()
         geom = vb.screenGeometry()
         if geom.width() > 0 and geom.height() > 0:
             aspect = geom.width() / geom.height()
         else:
-            aspect = 16.0 / 9.0  # Fallback
+            aspect = 16.0 / 9.0
         n_x_divs = n_y_divs * aspect
         x_half = (n_x_divs / 2) * self.timebase_us
 
-        # Center on trigger (t=0)
         self.plot_item.setXRange(-x_half, x_half, padding=0)
         self.plot_item.setYRange(-y_max, y_max, padding=0)
 
@@ -485,23 +457,16 @@ class WaveformWidget(QWidget):
             self.env_ch2.setVisible(self.ch2_visible)
 
     # ==================================================================
-    # Public API — PGA (future hardware gain amplifier)
+    # PGA
     # ==================================================================
 
     def set_pga_gain(self, channel: int, gain: float):
-        """
-        Set the programmable gain amplifier factor for a channel.
-        When PGA hardware is implemented, this compensates the ADC readings
-        so the displayed voltage reflects the actual input.
-        gain=1.0 means no amplification.
-        """
         if channel == 0:
             self.ch1_pga_gain = gain
         else:
             self.ch2_pga_gain = gain
 
     def _apply_pga(self, mv: np.ndarray, channel: int) -> np.ndarray:
-        """Apply inverse PGA gain to convert ADC reading to real input voltage."""
         gain = self.ch1_pga_gain if channel == 0 else self.ch2_pga_gain
         if gain != 1.0 and gain > 0:
             return mv / gain
@@ -526,12 +491,18 @@ class WaveformWidget(QWidget):
 
     def _update_roll(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray):
         """Roll mode: append new data and scroll the view."""
+        n = len(t_us)
+        if n == 0:
+            return
+
         if not self.roll_paused:
-            n = len(t_us)
+            # Calculate time step deterministically
+            dt_us = (t_us[-1] - t_us[0]) / n if n > 1 else self._last_dt_us
+            self._last_dt_us = dt_us
 
             # Convert frame time axis to absolute rolling time
             abs_t = t_us + self._roll_t_offset
-            self._roll_t_offset = abs_t[-1] + (abs_t[-1] - abs_t[-2]) if n > 1 else abs_t[-1] + 1
+            self._roll_t_offset = abs_t[-1] + dt_us
 
             self._roll_t_us = np.append(self._roll_t_us, abs_t)
 
@@ -557,7 +528,7 @@ class WaveformWidget(QWidget):
         if self.ch2_visible and len(self._roll_ch2) > 0:
             self.curve_ch2.setData(self._roll_t_us[:len(self._roll_ch2)], self._roll_ch2)
 
-        # Scroll viewport to follow latest data
+        # Scroll viewport
         if not self.roll_paused and len(self._roll_t_us) > 0:
             t_latest = self._roll_t_us[-1]
             vb = self.plot_item.getViewBox()
@@ -571,18 +542,16 @@ class WaveformWidget(QWidget):
         self.roll_paused = paused
 
     def set_roll_mode(self, enabled: bool):
-        """Toggle roll (strip-chart) mode."""
         self.roll_mode = enabled
         if not enabled:
-            # Reset rolling buffers
             self._roll_t_us = np.array([], dtype=np.float64)
             self._roll_ch1 = np.array([], dtype=np.float32)
             self._roll_ch2 = np.array([], dtype=np.float32)
             self._roll_t_offset = 0.0
+            self._last_dt_us = 10.0
             self._update_ranges()
 
     def update_envelope(self, t_us, ch1_min, ch1_max, ch2_min, ch2_max):
-        """Render envelope mode."""
         if self.ch1_visible and ch1_min is not None and ch1_max is not None:
             lo = self._apply_pga(ch1_min, 0) + self.ch1_offset_mv
             hi = self._apply_pga(ch1_max, 0) + self.ch1_offset_mv
@@ -595,14 +564,16 @@ class WaveformWidget(QWidget):
             self._env_ch2_hi.setData(t_us, hi)
 
     def update_persistence(self, frames: list):
-        """Render persistence (list of historical frames)."""
+        """Render persistence. frames viene en orden oldest->newest."""
         for i in range(5):
             self.persistence_curves_ch1[i].setData([], [])
             self.persistence_curves_ch2[i].setData([], [])
 
+        # BUG-M04 FIX: asignar newest -> alpha mas alto (curves[0])
+        # Revertimos para iterar newest primero
         count = min(5, len(frames))
         for i in range(count):
-            f = frames[i]
+            f = frames[-(i + 1)]  # frames[-1] = newest, frames[-5] = oldest
             t_us = f.get('time_axis_us')
             ch1 = f.get('ch0_mv')
             ch2 = f.get('ch1_mv')
@@ -620,11 +591,6 @@ class WaveformWidget(QWidget):
 
     def auto_scale(self, ch1_mv: np.ndarray | None, ch2_mv: np.ndarray | None,
                    sample_rate: int, sample_count: int):
-        """
-        Automatically adjust voltage scale and timebase to fit the signal.
-        Uses the current data in the buffer.
-        """
-        # Determine best voltage scale
         vpp = 0.0
         if ch1_mv is not None and len(ch1_mv) > 0:
             vpp = max(vpp, np.max(ch1_mv) - np.min(ch1_mv))
@@ -632,9 +598,8 @@ class WaveformWidget(QWidget):
             vpp = max(vpp, np.max(ch2_mv) - np.min(ch2_mv))
 
         if vpp < 1.0:
-            vpp = 100.0  # Default fallback
+            vpp = 100.0
 
-        # Target: signal fills ~6 out of 8 vertical divisions
         target_v_div = vpp / 6.0
         scales = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
         best_scale = scales[-1]
@@ -646,10 +611,9 @@ class WaveformWidget(QWidget):
         self.ch1_scale_mv = best_scale
         self.ch2_scale_mv = best_scale
 
-        # Determine best timebase
         if sample_rate > 0 and sample_count > 0:
             window_us = (sample_count / sample_rate) * 1e6
-            target_tb = window_us / 10.0  # 10 divs for the window
+            target_tb = window_us / 10.0
             timebases = [1, 2, 5, 10, 20, 50, 100, 200, 500,
                          1000, 2000, 5000, 10000, 20000, 50000,
                          100000, 200000, 500000, 1000000, 2000000, 5000000]

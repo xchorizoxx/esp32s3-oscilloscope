@@ -1,8 +1,8 @@
 """
-measurements_engine.py — Cálculo de mediciones automáticas en Python/NumPy.
+measurements_engine.py — Calculo de mediciones automaticas en Python/NumPy.
 
 Corre en un QThread separado para no bloquear la UI.
-Toma arrays de muestras en mV y calcula todas las métricas estándar de osciloscopio.
+Toma arrays de muestras en mV y calcula todas las metricas estandar de osciloscopio.
 """
 
 import numpy as np
@@ -12,9 +12,9 @@ from PyQt6.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
 
 class MeasurementsEngine(QThread):
     """
-    Thread que calcula mediciones automáticas sobre arrays de muestras en mV.
+    Thread que calcula mediciones automaticas sobre arrays de muestras en mV.
 
-    Señal emitida:
+    Senal emitida:
         measurements_ready(dict) — dict con canales 'ch0' y 'ch1'
     """
     measurements_ready = pyqtSignal(dict)
@@ -27,11 +27,11 @@ class MeasurementsEngine(QThread):
         self._pending  = None  # {'ch0': ndarray|None, 'ch1': ndarray|None, 'rate': int}
 
     # ------------------------------------------------------------------
-    # Interfaz pública
+    # Interfaz publica
     # ------------------------------------------------------------------
 
     def submit(self, ch0_mv: np.ndarray | None, ch1_mv: np.ndarray | None, sample_rate: int) -> None:
-        """Envía nuevas muestras para calcular. No bloqueante."""
+        """Envia nuevas muestras para calcular. No bloqueante."""
         self._mutex.lock()
         self._pending = {'ch0': ch0_mv, 'ch1': ch1_mv, 'rate': sample_rate}
         self._cond.wakeOne()
@@ -71,7 +71,7 @@ class MeasurementsEngine(QThread):
                 self.measurements_ready.emit(result)
 
     # ------------------------------------------------------------------
-    # Cálculos estáticos (se pueden usar directamente sin el thread)
+    # Calculos estaticos (se pueden usar directamente sin el thread)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -107,27 +107,23 @@ class MeasurementsEngine(QThread):
     def compute_frequency(samples: np.ndarray, sample_rate: int) -> float:
         """
         Frecuencia fundamental en Hz.
-        Usa autocorrelación para señales periódicas.
-        Retorna 0.0 si no se detecta período válido.
+        Usa autocorrelacion para senales periodicas.
+        Retorna 0.0 si no se detecta periodo valido.
         """
         if sample_rate <= 0 or len(samples) < 4:
             return 0.0
-        # Remover DC
         ac = samples - np.mean(samples)
-        if np.max(np.abs(ac)) < 1.0:  # Señal plana (< 1mV AC)
+        if np.max(np.abs(ac)) < 1.0:  # Senal plana (< 1mV AC)
             return 0.0
-        # Autocorrelación via FFT
         N = len(ac)
         corr = np.correlate(ac, ac, mode='full')
         corr = corr[N - 1:]
         corr /= corr[0]
-        # Buscar el primer cero cruzando de positivo a negativo, luego el siguiente pico
         try:
-            # Picos de la autocorrelación (excluir el lag=0)
             peaks, _ = scipy_signal.find_peaks(corr[1:], height=0.3)
             if len(peaks) == 0:
                 return 0.0
-            period_samples = peaks[0] + 1  # +1 porque indexamos desde corr[1:]
+            period_samples = peaks[0] + 1
             if period_samples == 0:
                 return 0.0
             return float(sample_rate / period_samples)
@@ -136,7 +132,7 @@ class MeasurementsEngine(QThread):
 
     @staticmethod
     def compute_period(samples: np.ndarray, sample_rate: int) -> float:
-        """Período en µs."""
+        """Periodo en us."""
         freq = MeasurementsEngine.compute_frequency(samples, sample_rate)
         if freq <= 0:
             return 0.0
@@ -145,13 +141,13 @@ class MeasurementsEngine(QThread):
     @staticmethod
     def compute_duty_cycle(samples: np.ndarray) -> float:
         """
-        Duty cycle en % para señales digitales.
+        Duty cycle en % para senales digitales.
         Usa el umbral del 50% entre vmin y vmax.
         """
         vmax = np.max(samples)
         vmin = np.min(samples)
         if (vmax - vmin) < 1.0:
-            return 50.0  # Señal plana
+            return 50.0
         threshold = (vmax + vmin) / 2.0
         high = np.sum(samples >= threshold)
         return float(high / len(samples) * 100.0)
@@ -159,8 +155,8 @@ class MeasurementsEngine(QThread):
     @staticmethod
     def compute_rise_time(samples: np.ndarray, sample_rate: int) -> float:
         """
-        Tiempo de subida (10% → 90%) en µs.
-        Retorna 0.0 si no hay transición detectada.
+        Tiempo de subida (10% -> 90%) en us.
+        Retorna 0.0 si no hay transicion detectada.
         """
         if sample_rate <= 0 or len(samples) < 4:
             return 0.0
@@ -172,7 +168,6 @@ class MeasurementsEngine(QThread):
         lo = vmin + 0.1 * vpp
         hi = vmin + 0.9 * vpp
         sample_period_us = 1e6 / sample_rate
-        # Buscar primera transición ascendente
         for i in range(len(samples) - 1):
             if samples[i] <= lo:
                 for j in range(i + 1, len(samples)):
@@ -185,7 +180,7 @@ class MeasurementsEngine(QThread):
     @staticmethod
     def compute_fall_time(samples: np.ndarray, sample_rate: int) -> float:
         """
-        Tiempo de bajada (90% → 10%) en µs.
+        Tiempo de bajada (90% -> 10%) en us.
         """
         if sample_rate <= 0 or len(samples) < 4:
             return 0.0
@@ -197,7 +192,6 @@ class MeasurementsEngine(QThread):
         lo = vmin + 0.1 * vpp
         hi = vmin + 0.9 * vpp
         sample_period_us = 1e6 / sample_rate
-        # Buscar primera transición descendente
         for i in range(len(samples) - 1):
             if samples[i] >= hi:
                 for j in range(i + 1, len(samples)):
@@ -209,7 +203,7 @@ class MeasurementsEngine(QThread):
 
     @classmethod
     def compute_all(cls, samples: np.ndarray, sample_rate: int) -> dict:
-        """Calcula todas las métricas y retorna un dict."""
+        """Calcula todas las metricas y retorna un dict."""
         if samples is None or len(samples) == 0:
             return {}
         return {

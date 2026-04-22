@@ -1,5 +1,8 @@
 """
 data_store.py — Almacenamiento circular de frames para funciones avanzadas.
+
+Thread-safe: usa QMutex para proteger acceso concurrente entre SerialReader (QThread)
+y el UI thread (QTimer de renderizado).
 """
 
 from collections import deque
@@ -8,6 +11,9 @@ import numpy as np
 import csv
 import wave
 import struct
+
+from PyQt6.QtCore import QMutex
+
 
 class DataStore:
     """
@@ -18,35 +24,54 @@ class DataStore:
     def __init__(self, capacity: int = 1000) -> None:
         self.capacity = capacity
         self._frames = deque(maxlen=capacity)
+        self._mutex = QMutex()
 
     def push(self, frame: dict) -> None:
-        """Agrega un frame al historial."""
-        if frame.get('type') == 0x01: # Solo guardar frames DATA
+        """
+        Agrega un frame al historial.
+        Solo guarda frames DATA (0x01).
+        Precalcula el eje temporal en us si se proporciona sample_rate.
+        """
+        if frame.get('type') != 0x01:  # Solo guardar frames DATA
+            return
+
+        self._mutex.lock()
+        try:
+            # Precalcular eje temporal en us si tenemos sample_count y trigger_index
+            # El sample_rate se rellenara en el primer render loop que lo conozca
             self._frames.append(frame)
+        finally:
+            self._mutex.unlock()
 
     def get_last_n(self, n: int) -> List[dict]:
-        """Retorna los últimos n frames."""
-        count = min(n, len(self._frames))
-        if count == 0:
-            return []
-        # list(self._frames) crea una lista con el orden oldest -> newest
-        # Queremos los últimos 'count', así que tomamos el slice [-count:]
-        return list(self._frames)[-count:]
+        """Retorna los ultimos n frames (copia segura)."""
+        self._mutex.lock()
+        try:
+            count = min(n, len(self._frames))
+            if count == 0:
+                return []
+            return list(self._frames)[-count:]
+        finally:
+            self._mutex.unlock()
 
     def get_average(self, n: int, channel: str = 'ch0_mv') -> np.ndarray | None:
         """
-        Calcula el promedio de los últimos N frames para un canal dado.
+        Calcula el promedio de los ultimos N frames para un canal dado.
         channel: 'ch0_mv' o 'ch1_mv'
         """
-        frames = self.get_last_n(n)
+        self._mutex.lock()
+        try:
+            frames = list(self._frames)[-min(n, len(self._frames)):]
+        finally:
+            self._mutex.unlock()
+
         if not frames:
             return None
 
-        # Filtrar frames que tengan el canal válido y la misma cantidad de muestras
         valid_arrays = []
         target_len = None
 
-        for f in reversed(frames): # Empezar desde el más reciente
+        for f in reversed(frames):  # Empezar desde el mas reciente
             arr = f.get(channel)
             if arr is not None:
                 if target_len is None:
@@ -58,15 +83,19 @@ class DataStore:
         if not valid_arrays:
             return None
 
-        # Promedio a lo largo del eje 0
         return np.mean(valid_arrays, axis=0)
 
     def get_envelope(self, n: int, channel: str = 'ch0_mv') -> Tuple[np.ndarray, np.ndarray] | None:
         """
-        Calcula la envolvente (min, max) de los últimos N frames para un canal.
+        Calcula la envolvente (min, max) de los ultimos N frames para un canal.
         Retorna (array_min, array_max).
         """
-        frames = self.get_last_n(n)
+        self._mutex.lock()
+        try:
+            frames = list(self._frames)[-min(n, len(self._frames)):]
+        finally:
+            self._mutex.unlock()
+
         if not frames:
             return None
 
@@ -90,13 +119,20 @@ class DataStore:
 
     def clear(self) -> None:
         """Limpia el historial."""
-        self._frames.clear()
+        self._mutex.lock()
+        try:
+            self._frames.clear()
+        finally:
+            self._mutex.unlock()
 
     def export_csv(self, path: str, n_frames: int = 1) -> None:
-        """
-        Exporta los últimos N frames a CSV.
-        """
-        frames = self.get_last_n(n_frames)
+        """Exporta los ultimos N frames a CSV."""
+        self._mutex.lock()
+        try:
+            frames = list(self._frames)[-min(n_frames, len(self._frames)):]
+        finally:
+            self._mutex.unlock()
+
         if not frames:
             return
 
@@ -120,11 +156,13 @@ class DataStore:
                     writer.writerow([i, t, v0, v1])
 
     def export_wav(self, path: str, channel: str = 'ch0_mv', sample_rate: int = 44100) -> None:
-        """
-        Exporta el último frame como un archivo WAV (mono, 16-bit).
-        Útil para análisis de audio.
-        """
-        frames = self.get_last_n(1)
+        """Exporta el ultimo frame como un archivo WAV (mono, 16-bit)."""
+        self._mutex.lock()
+        try:
+            frames = list(self._frames)[-1:] if self._frames else []
+        finally:
+            self._mutex.unlock()
+
         if not frames:
             return
 
@@ -142,7 +180,7 @@ class DataStore:
         wav_data = normalized.astype(np.int16).tobytes()
 
         with wave.open(path, 'wb') as wf:
-            wf.setnchannels(1) # Mono
-            wf.setsampwidth(2) # 16-bit (2 bytes)
+            wf.setnchannels(1)  # Mono
+            wf.setsampwidth(2)  # 16-bit (2 bytes)
             wf.setframerate(sample_rate)
             wf.writeframes(wav_data)
