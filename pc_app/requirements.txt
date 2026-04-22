@@ -1,0 +1,6 @@
+pyserial>=3.5
+numpy>=1.26
+scipy>=1.11
+pyqtgraph>=0.13.3
+PyQt6>=6.6.0
+pyinstaller>=6.0

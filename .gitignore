@@ -25,3 +25,11 @@ __pycache__/
 # OS ignore
 .DS_Store
 Thumbs.db
+
+# PC App ignore
+pc_app/.venv/
+pc_app/build/
+pc_app/dist/
+pc_app/*.spec
+!pc_app/build.spec
+
