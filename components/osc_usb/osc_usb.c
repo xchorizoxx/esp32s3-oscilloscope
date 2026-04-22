@@ -70,11 +70,11 @@ static void tusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         if (tmp[i] == '\n' || tmp[i] == '\r') {
             if (s_rx_len > 0) {
                 s_rx_buf[s_rx_len] = '\0';
-                // Copiar comando al queue para procesamiento fuera de la ISR
+                // CDC callback en esp_tinyusb v2.x corre desde tarea, NO desde ISR
                 if (s_cmd_queue) {
                     char cmd[256];
                     memcpy(cmd, s_rx_buf, s_rx_len + 1);
-                    xQueueSendFromISR(s_cmd_queue, cmd, NULL);
+                    xQueueSend(s_cmd_queue, cmd, 0);
                 }
                 s_rx_len = 0;
             }
@@ -328,14 +328,14 @@ static size_t build_measurements_frame(const osc_frame_t *frame, uint8_t *out_bu
 /* --------------------------------------------------------------------------
  * API pública de envío
  * -------------------------------------------------------------------------- */
-static esp_err_t usb_write_locked(const uint8_t *buf, size_t len)
+static esp_err_t usb_write_raw(const uint8_t *buf, size_t len)
 {
     if (!s_connected || !tud_cdc_n_connected(0)) return ESP_ERR_INVALID_STATE;
-    xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
-    esp_err_t ret = tinyusb_cdcacm_write_queue(0, buf, len);
-    if (ret == ESP_OK) tinyusb_cdcacm_write_flush(0, pdMS_TO_TICKS(10));
-    xSemaphoreGive(s_tx_mutex);
-    return ret;
+    size_t queued = tinyusb_cdcacm_write_queue(0, buf, len);
+    if (queued > 0) {
+        tinyusb_cdcacm_write_flush(0, pdMS_TO_TICKS(10));
+    }
+    return (queued == len) ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t osc_usb_send_data_frame(const osc_frame_t *frame)
@@ -343,8 +343,9 @@ esp_err_t osc_usb_send_data_frame(const osc_frame_t *frame)
     if (!frame || !frame->ch0_data) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
     size_t len = build_data_frame(frame, s_tx_buf);
+    esp_err_t ret = usb_write_raw(s_tx_buf, len);
     xSemaphoreGive(s_tx_mutex);
-    return usb_write_locked(s_tx_buf, len);
+    return ret;
 }
 
 esp_err_t osc_usb_send_measurements(const osc_frame_t *frame)
@@ -352,13 +353,15 @@ esp_err_t osc_usb_send_measurements(const osc_frame_t *frame)
     if (!frame) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
     size_t len = build_measurements_frame(frame, s_tx_buf);
+    esp_err_t ret = usb_write_raw(s_tx_buf, len);
     xSemaphoreGive(s_tx_mutex);
-    return usb_write_locked(s_tx_buf, len);
+    return ret;
 }
 
 esp_err_t osc_usb_send_info(void)
 {
     uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
     size_t pos = 0;
 
     buf[pos++] = OSC_PROTO_SYNC1;
@@ -384,12 +387,17 @@ esp_err_t osc_usb_send_info(void)
     pos += 32;  // campo fijo de 32 bytes
 
     buf[pos] = crc8(buf, pos); pos++;
-    return usb_write_locked(buf, pos);
+
+    xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
+    esp_err_t ret = usb_write_raw(buf, pos);
+    xSemaphoreGive(s_tx_mutex);
+    return ret;
 }
 
 esp_err_t osc_usb_send_ack(const char *cmd_str)
 {
     uint8_t buf[48];
+    memset(buf, 0, sizeof(buf));
     size_t pos = 0;
     buf[pos++] = OSC_PROTO_SYNC1;
     buf[pos++] = OSC_PROTO_SYNC2;
@@ -399,12 +407,17 @@ esp_err_t osc_usb_send_ack(const char *cmd_str)
     memcpy(&buf[pos], cmd_str, clen);
     pos += 32;
     buf[pos] = crc8(buf, pos); pos++;
-    return usb_write_locked(buf, pos);
+
+    xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
+    esp_err_t ret = usb_write_raw(buf, pos);
+    xSemaphoreGive(s_tx_mutex);
+    return ret;
 }
 
 esp_err_t osc_usb_send_nak(const char *cmd_str, const char *reason)
 {
     uint8_t buf[80];
+    memset(buf, 0, sizeof(buf));
     size_t pos = 0;
     buf[pos++] = OSC_PROTO_SYNC1;
     buf[pos++] = OSC_PROTO_SYNC2;
@@ -418,7 +431,11 @@ esp_err_t osc_usb_send_nak(const char *cmd_str, const char *reason)
     if (reason) memcpy(&buf[pos], reason, rlen);
     pos += 32;
     buf[pos] = crc8(buf, pos); pos++;
-    return usb_write_locked(buf, pos);
+
+    xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
+    esp_err_t ret = usb_write_raw(buf, pos);
+    xSemaphoreGive(s_tx_mutex);
+    return ret;
 }
 
 bool osc_usb_is_connected(void) { return s_connected; }
