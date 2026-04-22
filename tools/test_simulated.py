@@ -142,7 +142,7 @@ def main():
 
     # Load stylesheet
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    qss_path = os.path.join(base_dir, "assets", "stylesheet.qss")
+    qss_path = os.path.join(base_dir, "..", "pc_app", "assets", "stylesheet.qss")
     try:
         with open(qss_path, "r") as f:
             app.setStyleSheet(f.read())

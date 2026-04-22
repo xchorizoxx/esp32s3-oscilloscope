@@ -47,6 +47,7 @@ class TriggerPanel(QWidget):
         # Level
         lvl_layout = QHBoxLayout()
         lvl_layout.addWidget(QLabel("Level:"))
+        self.spin_lvl = QDoubleSpinBox()
         self.spin_lvl.setRange(-3000, 3000)
         self.spin_lvl.setSuffix(" mV")
         self.spin_lvl.setDecimals(1)
