@@ -227,8 +227,8 @@ static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx)
     if (s_cali_handle[ch_idx]) {
         adc_cali_raw_to_voltage(s_cali_handle[ch_idx], (int)raw, &voltage_mv);
     } else {
-        // Sin calibración: escala lineal aproximada para 12dB atten (0–2500 mV)
-        voltage_mv = (int)((raw * 2500L) / 4095);
+        // Sin calibración: escala lineal aproximada para 12dB atten (0–3100 mV)
+        voltage_mv = (int)((raw * 3100L) / 4095);
     }
     return (int16_t)(voltage_mv * 10);
 }
