@@ -9,7 +9,7 @@ Correcciones:
 
 from PyQt6.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
                             QGroupBox, QLabel, QComboBox, QPushButton, QCheckBox,
-                            QSpacerItem, QSizePolicy, QSpinBox, QScrollArea)
+                            QSpacerItem, QSizePolicy, QSpinBox, QDoubleSpinBox, QScrollArea)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
 from .channel_panel import ChannelPanel
@@ -420,3 +420,15 @@ class ControlsPanel(QDockWidget):
         self.btn_connect.setText("Disconnect" if connected else "Connect")
         if not connected:
             self.lbl_fw.setText("FW: Unknown")
+
+    def _on_gen_start(self):
+        freq = int(self.spin_gen_freq.value())
+        duty = int(self.spin_gen_duty.value())
+        self.btn_gen_start.setEnabled(False)
+        self.btn_gen_stop.setEnabled(True)
+        self.gen_start_requested.emit(freq, duty)
+
+    def _on_gen_stop(self):
+        self.btn_gen_start.setEnabled(True)
+        self.btn_gen_stop.setEnabled(False)
+        self.gen_stop_requested.emit()

@@ -132,10 +132,11 @@ static void process_command(const char *cmd)
     if (strncmp(cmd, OSC_CMD_SET_MODE, strlen(OSC_CMD_SET_MODE)) == 0) {
         int mode = 0;
         if (sscanf(cmd + strlen(OSC_CMD_SET_MODE), " %d", &mode) == 1) {
-            if (osc_config_set_mode((osc_mode_t)mode) == ESP_OK)
+            if (osc_config_set_mode((osc_mode_t)mode) == ESP_OK) {
                 osc_usb_send_ack(cmd);
-            else
+            } else {
                 osc_usb_send_nak(cmd, "modo invalido");
+            }
         } else {
             osc_usb_send_nak(cmd, "argumento requerido");
         }
@@ -146,10 +147,11 @@ static void process_command(const char *cmd)
     if (strncmp(cmd, OSC_CMD_SET_RATE, strlen(OSC_CMD_SET_RATE)) == 0) {
         unsigned hz = 0;
         if (sscanf(cmd + strlen(OSC_CMD_SET_RATE), " %u", &hz) == 1) {
-            if (osc_config_set_rate(hz) == ESP_OK)
+            if (osc_config_set_rate(hz) == ESP_OK) {
                 osc_usb_send_ack(cmd);
-            else
+            } else {
                 osc_usb_send_nak(cmd, "frecuencia fuera de rango");
+            }
         } else {
             osc_usb_send_nak(cmd, "argumento requerido");
         }
@@ -174,10 +176,11 @@ static void process_command(const char *cmd)
     if (strncmp(cmd, OSC_CMD_SET_ATTEN, strlen(OSC_CMD_SET_ATTEN)) == 0) {
         int ch = 0, db = 0;
         if (sscanf(cmd + strlen(OSC_CMD_SET_ATTEN), " %d %d", &ch, &db) == 2) {
-            if (osc_config_set_atten((uint8_t)ch, (osc_atten_t)db) == ESP_OK)
+            if (osc_config_set_atten((uint8_t)ch, (osc_atten_t)db) == ESP_OK) {
                 osc_usb_send_ack(cmd);
-            else
+            } else {
                 osc_usb_send_nak(cmd, "parametros invalidos");
+            }
         } else {
             osc_usb_send_nak(cmd, "2 argumentos requeridos: ch db");
         }

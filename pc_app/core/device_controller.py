@@ -392,6 +392,10 @@ class DeviceController(QObject):
     def factory_reset(self) -> bool:
         return self._send_command("CMD_FACTORY_RESET")[0]
 
+    def single_shot(self) -> bool:
+        logging.warning("Single shot no implementado en firmware todavia.")
+        return False
+
     def get_status(self) -> bool:
         return self._send_command("CMD_GET_STATUS")[0]
 

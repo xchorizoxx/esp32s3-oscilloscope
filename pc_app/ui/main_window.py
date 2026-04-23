@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
 
         # Display modes
         cp.display_mode_changed.connect(self._on_display_mode)
-        cp.ui_hold_changed.connect(self._on_ui_hold)
+        cp.ui_hold_changed.connect(self.set_ui_hold)
 
         # Signal Generator
         cp.gen_start_requested.connect(self.controller.set_gen_start)

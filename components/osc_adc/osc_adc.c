@@ -145,10 +145,16 @@ esp_err_t osc_adc_init(void)
         };
     }
 
+    // El ESP32-S3 solo soporta entre 20kHz y 83.3kHz en modo continuo.
+    // Para frecuencias menores, usamos 20kHz y diezmamos en software.
+    uint32_t hw_rate = cfg.sample_rate_hz;
+    if (hw_rate < 20000) hw_rate = 20000;
+    if (hw_rate > 83333) hw_rate = 83333;
+
     adc_continuous_config_t dig_cfg = {
         .pattern_num    = n_channels,
         .adc_pattern    = pattern,
-        .sample_freq_hz = cfg.sample_rate_hz,
+        .sample_freq_hz = hw_rate,
         .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
         .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2,
     };
@@ -273,6 +279,15 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
     static int16_t prev_ch0[2] = {0};  // últimas 2 muestras ch0
     static int16_t prev_ch1[2] = {0};
 
+    // Decimation logic for low sample rates
+    uint32_t hw_rate = cfg.sample_rate_hz;
+    if (hw_rate < 20000) hw_rate = 20000;
+    if (hw_rate > 83333) hw_rate = 83333;
+    
+    uint32_t skip_factor = hw_rate / cfg.sample_rate_hz;
+    if (skip_factor < 1) skip_factor = 1;
+    static uint32_t skip_count = 0;
+
     for (size_t i = 0; i < result_size && written < max_count; i++) {
         adc_digi_output_data_t *p = (adc_digi_output_data_t *)&s_raw_buf[i * SOC_ADC_DIGI_RESULT_BYTES];
 
@@ -280,6 +295,10 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
         uint16_t raw = p->type2.data;
 
         if (!dual) {
+            // Decimar si es necesario
+            if (++skip_count < skip_factor) continue;
+            skip_count = 0;
+
             // Single channel: cada resultado es ch0
             int16_t cur = raw_to_mv10(raw, 0);
             int16_t filtered = median3_i16(prev_ch0[0], prev_ch0[1], cur);
@@ -288,11 +307,10 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
 
             buf[written].ch0_mv10      = filtered;
             buf[written].ch1_mv10      = 0;
-            buf[written].timestamp_us  = timestamp + (uint32_t)(i * 1000000UL / cfg.sample_rate_hz);
+            buf[written].timestamp_us  = timestamp + (uint32_t)(written * 1000000UL / cfg.sample_rate_hz);
             written++;
         } else {
             // Dual channel: el ADC alterna CH0 y CH1
-            // Buscamos pares (ch0, ch1) consecutivos
             static int16_t last_ch0 = 0;
             static bool has_ch0 = false;
 
@@ -300,10 +318,17 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
                 last_ch0 = raw_to_mv10(raw, 0);
                 has_ch0  = true;
             } else if (ch == 1 && has_ch0) {
+                // Decimar par completo
+                if (++skip_count < skip_factor) {
+                    has_ch0 = false;
+                    continue;
+                }
+                skip_count = 0;
+
                 int16_t mv10_ch1 = raw_to_mv10(raw, 1);
                 buf[written].ch0_mv10     = last_ch0;
                 buf[written].ch1_mv10     = mv10_ch1;
-                buf[written].timestamp_us = timestamp + (uint32_t)((i/2) * 2000000UL / cfg.sample_rate_hz);
+                buf[written].timestamp_us = timestamp + (uint32_t)(written * 1000000UL / cfg.sample_rate_hz);
                 written++;
                 has_ch0 = false;
             }

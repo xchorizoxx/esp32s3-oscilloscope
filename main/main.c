@@ -114,7 +114,14 @@ static void adc_capture_task(void *arg)
     ESP_LOGI(TAG, "ADC_CAPTURE iniciado en Core %d", xPortGetCoreID());
 
     osc_config_t cfg;
+    osc_config_get(&cfg);
     uint32_t last_config_check = 0;
+    
+    // Guardar estado actual de config del hardware
+    osc_mode_t last_mode = cfg.mode;
+    uint32_t last_rate = cfg.sample_rate_hz;
+    osc_atten_t last_atten0 = cfg.ch_atten[0];
+    osc_atten_t last_atten1 = cfg.ch_atten[1];
 
     // Iniciar ADC (ya inicializado en app_main, solo lo arrancamos)
     ESP_ERROR_CHECK(osc_adc_start());
@@ -125,6 +132,17 @@ static void adc_capture_task(void *arg)
         if (now - last_config_check > 100) {
             osc_config_get(&cfg);
             last_config_check = now;
+            
+            // Si hubo cambio a nivel hardware, reconfigurar el ADC de forma segura
+            if (cfg.mode != last_mode || cfg.sample_rate_hz != last_rate || 
+                cfg.ch_atten[0] != last_atten0 || cfg.ch_atten[1] != last_atten1) {
+                ESP_LOGI(TAG, "ADC config changed, reconfiguring...");
+                osc_adc_reconfigure();
+                last_mode = cfg.mode;
+                last_rate = cfg.sample_rate_hz;
+                last_atten0 = cfg.ch_atten[0];
+                last_atten1 = cfg.ch_atten[1];
+            }
         }
 
         size_t count = 0;
