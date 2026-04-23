@@ -62,9 +62,17 @@ def main():
         controller.stop_stream()
 
     # Reconectar las senales de los botones para incluir ui_hold
+    # BUG-04 FIX: disconnect() sin args puede lanzar RuntimeError en PyQt6
+    # si la senal no tiene slots previos conectados.
     cp = window.controls_panel
-    cp.start_stream_requested.disconnect()
-    cp.stop_stream_requested.disconnect()
+    try:
+        cp.start_stream_requested.disconnect()
+    except RuntimeError:
+        pass
+    try:
+        cp.stop_stream_requested.disconnect()
+    except RuntimeError:
+        pass
     cp.start_stream_requested.connect(_on_run)
     cp.stop_stream_requested.connect(_on_stop)
 

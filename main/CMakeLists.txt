@@ -8,6 +8,7 @@ idf_component_register(
         osc_trigger
         osc_dsp
         osc_usb
+        osc_gen
         freertos
         esp_timer
         nvs_flash

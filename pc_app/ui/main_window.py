@@ -76,7 +76,8 @@ class MainWindow(QMainWindow):
             MeasurementsPanel.DockWidgetFeature.DockWidgetFloatable
         )
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.meas_panel)
-        self.meas_panel.hide()
+        # BUG-10 FIX: show measurements panel by default (was hidden)
+        # self.meas_panel.hide()  <-- removed
 
         # StatusBar
         self.status_bar = AppStatusBar()
@@ -94,8 +95,8 @@ class MainWindow(QMainWindow):
 
         # --- NUEVO: Estado del AC coupling filter (Integrador EMA) ---
         self._ac_couple_state = {
-            0: {'dc_offset': None, 'mode': 'AC+DC'},
-            1: {'dc_offset': None, 'mode': 'AC+DC'},
+            0: {'dc_offset': None, 'mode': 'DC'},
+            1: {'dc_offset': None, 'mode': 'DC'},
         }
 
         self._setup_connections()
@@ -118,9 +119,16 @@ class MainWindow(QMainWindow):
         cp.auto_scale_requested.connect(self._on_auto_scale)
         cp.refresh_ports_requested.connect(self._populate_ports)
         cp.theme_toggle_requested.connect(self._on_theme_toggle)
+        cp.reload_requested.connect(self.reload_app)
 
         # Display modes
         cp.display_mode_changed.connect(self._on_display_mode)
+        cp.ui_hold_changed.connect(self._on_ui_hold)
+
+        # Signal Generator
+        cp.gen_start_requested.connect(self.controller.set_gen_start)
+        cp.gen_stop_requested.connect(self.controller.set_gen_stop)
+
         cp.timebase_changed.connect(self.waveform_widget.set_timebase)
         cp.roll_mode_changed.connect(self.waveform_widget.set_roll_mode)
         cp.roll_paused_changed.connect(self.waveform_widget.set_roll_paused)
@@ -138,12 +146,16 @@ class MainWindow(QMainWindow):
         cp.ch1_panel.offset_changed.connect(lambda o: self.waveform_widget.set_ch_offset(0, o))
         cp.ch1_panel.attenuation_changed.connect(lambda a: self.controller.set_attenuation(0, a))
         cp.ch1_panel.coupling_changed.connect(lambda c: self._on_coupling_changed(0, c))
+        # BUG-12 FIX: CAL GND resets EMA integrator for CH1
+        cp.ch1_panel.cal_gnd_requested.connect(lambda: self._on_cal_gnd(0))
 
         cp.ch2_panel.visibility_changed.connect(lambda v: self.waveform_widget.set_ch_visible(1, v))
         cp.ch2_panel.scale_changed.connect(lambda s: self.waveform_widget.set_voltage_scale(s, 1))
         cp.ch2_panel.offset_changed.connect(lambda o: self.waveform_widget.set_ch_offset(1, o))
         cp.ch2_panel.attenuation_changed.connect(lambda a: self.controller.set_attenuation(1, a))
         cp.ch2_panel.coupling_changed.connect(lambda c: self._on_coupling_changed(1, c))
+        # BUG-12 FIX: CAL GND resets EMA integrator for CH2
+        cp.ch2_panel.cal_gnd_requested.connect(lambda: self._on_cal_gnd(1))
 
         # Trigger
         cp.trig_panel.trigger_params_changed.connect(self.controller.set_trigger)
@@ -171,25 +183,65 @@ class MainWindow(QMainWindow):
         self.controls_panel.on_connection_changed(connected)
         if not connected:
             self.status_bar.update_rate(0)
+            # Ghost frame fix: clear waveform when disconnected
+            self._clear_waveform()
+
+    def _clear_waveform(self):
+        """Borra todas las curvas del waveform widget (evita ghost frames)."""
+        ww = self.waveform_widget
+        ww.curve_ch1.setData([], [])
+        ww.curve_ch2.setData([], [])
+        for c in ww.persistence_curves_ch1:
+            c.setData([], [])
+        for c in ww.persistence_curves_ch2:
+            c.setData([], [])
+        ww._env_ch1_lo.setData([], [])
+        ww._env_ch1_hi.setData([], [])
+        ww._env_ch2_lo.setData([], [])
+        ww._env_ch2_hi.setData([], [])
 
     def _on_coupling_changed(self, ch: int, coupling: str):
         """Maneja cambio de AC/DC/GND coupling. Actualiza estado local y controller."""
         self._ac_couple_state[ch]['mode'] = coupling.upper()
-        if coupling.upper() in ['AC+DC', 'GND']:
+        if coupling.upper() in ['DC', 'GND']:
             self._ac_couple_state[ch]['dc_offset'] = None
         self.controller.set_coupling(ch, coupling)
 
+    def _on_cal_gnd(self, ch: int):
+        """
+        BUG-12 FIX: Calibracion de GND.
+        Resetea el integrador EMA del canal dado para que la senal se
+        muestre centrada en su nivel real de cero del ADC.
+        Corrige el sintoma: 'senal cae a -1V al desconectar la entrada'.
+        """
+        self._ac_couple_state[ch]['dc_offset'] = None
+        # Tambien limpiar la pantalla para que el usuario vea el efecto inmediato
+        if ch == 0:
+            self.waveform_widget.curve_ch1.setData([], [])
+        else:
+            self.waveform_widget.curve_ch2.setData([], [])
+
+    def reload_app(self):
+        """Recarga completa de la aplicacion Python (re-exec del proceso)."""
+        import os, sys
+        # Asegurarse de desconectar hardware antes de reiniciar
+        try:
+            self.controller.disconnect_device()
+        except Exception:
+            pass
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def _apply_ac_coupling(self, samples: np.ndarray, ch: int, sample_rate: int) -> np.ndarray:
         """
-        Aplica filtro de visualización según el modo seleccionado (AC+DC, AC, DC, GND).
+        Aplica filtro de visualización según el modo seleccionado (DC, AC, GND).
         Usa un Integrador (EMA) para aislar la componente DC de la alterna.
         """
-        mode = self._ac_couple_state[ch].get('mode', 'AC+DC')
+        mode = self._ac_couple_state[ch].get('mode', 'DC')
         
         if mode == 'GND':
             return np.zeros_like(samples)
             
-        if mode == 'AC+DC':
+        if mode == 'DC':
             return samples
             
         if len(samples) == 0:
@@ -211,9 +263,6 @@ class MainWindow(QMainWindow):
         if mode == 'AC':
             ac_signal = samples - state['dc_offset']
             return ac_signal.astype(samples.dtype)
-        elif mode == 'DC':
-            dc_signal = np.full_like(samples, state['dc_offset'])
-            return dc_signal.astype(samples.dtype)
             
         return samples
 
@@ -291,7 +340,10 @@ class MainWindow(QMainWindow):
         # 1. Update status bar stats
         if self.controller.connected:
             stats = self.reader.get_stats()
-            self.status_bar.update_stats(stats['fps'], stats['bytes_sec'], stats['frames_crc_err'])
+            # BUG-01 FIX: key was 'bytes_sec', real key is 'bytes_per_sec'
+            # BUG-03 FIX: update_stats expects (fps, bytes_sec, overflow_count)
+            #             pass _overflow_count as overflow counter, not frames_crc_err
+            self.status_bar.update_stats(stats['fps'], stats['bytes_per_sec'], self._overflow_count)
             self.status_bar.update_rate(self.controller.current_config.sample_rate)
 
         # NUEVO: Si ui_hold esta activo, NO renderizar datos nuevos
@@ -334,15 +386,18 @@ class MainWindow(QMainWindow):
 
         # 6. Waveform Render
         mode = self.waveform_widget.display_mode
-        if mode == 'normal':
+        if self.waveform_widget.roll_mode:
+            # En Roll mode, forzamos render normal acumulativo y saltamos otros modos
+            self.waveform_widget.update_frame(t_us, ch1, ch2)
+        elif mode == 'normal':
             self.waveform_widget.update_frame(t_us, ch1, ch2)
         elif mode == 'average':
             a1 = self.data_store.get_average(4, 'ch0_mv')
             a2 = self.data_store.get_average(4, 'ch1_mv')
             # Aplicar AC coupling a los promedios tambien
-            if a1 is not None and self._ac_couple_state[0]['enabled']:
+            if a1 is not None and self._ac_couple_state[0]['mode'] != 'DC':
                 a1 = self._apply_ac_coupling(a1, 0, rate)
-            if a2 is not None and self._ac_couple_state[1]['enabled']:
+            if a2 is not None and self._ac_couple_state[1]['mode'] != 'DC':
                 a2 = self._apply_ac_coupling(a2, 1, rate)
             self.waveform_widget.update_frame(t_us, a1, a2)
         elif mode == 'envelope':
@@ -352,8 +407,27 @@ class MainWindow(QMainWindow):
             min2, max2 = e2 if e2 else (None, None)
             self.waveform_widget.update_envelope(t_us, min1, max1, min2, max2)
         elif mode == 'persistence':
-            # Los frames ya tienen time_axis_us correcto del parser
-            self.waveform_widget.update_persistence(frames)
+            processed_frames = []
+            for f in frames:
+                f_ch1_raw = f.get('ch0_mv')
+                f_ch2_raw = f.get('ch1_mv')
+                f_ch1 = self._apply_ac_coupling(f_ch1_raw, 0, rate) if f_ch1_raw is not None else None
+                f_ch2 = self._apply_ac_coupling(f_ch2_raw, 1, rate) if f_ch2_raw is not None else None
+                
+                f_count = f.get('sample_count', 0)
+                f_trig = f.get('trigger_index', 0)
+                if rate > 0 and f_count > 0:
+                    dt = 1e6 / rate
+                    f_t = np.arange(f_count, dtype=np.float64) * dt - f_trig * dt
+                else:
+                    f_t = f.get('time_axis_us')
+                    
+                processed_frames.append({
+                    'time_axis_us': f_t,
+                    'ch0_mv': f_ch1,
+                    'ch1_mv': f_ch2
+                })
+            self.waveform_widget.update_persistence(processed_frames)
 
         # 7. XY Render
         if not self.xy_widget.isHidden():

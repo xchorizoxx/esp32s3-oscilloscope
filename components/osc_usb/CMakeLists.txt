@@ -4,6 +4,7 @@ idf_component_register(
     REQUIRES
         osc_config
         osc_dsp
+        osc_gen
         freertos
         esp_common
         log

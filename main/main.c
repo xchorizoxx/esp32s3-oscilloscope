@@ -35,6 +35,7 @@
 #include "osc_dsp.h"
 #include "osc_usb.h"
 #include "osc_protocol.h"
+#include "osc_gen.h"
 
 static const char *TAG = "osc_main";
 
@@ -72,25 +73,16 @@ static SemaphoreHandle_t s_staging_mutex = NULL;
  * -------------------------------------------------------------------------- */
 static void init_test_signal(void)
 {
-    ledc_timer_config_t timer_cfg = {
-        .speed_mode      = LEDC_LOW_SPEED_MODE,
-        .timer_num       = LEDC_TIMER_0,
-        .duty_resolution = LEDC_TIMER_10_BIT,
-        .freq_hz         = 1000,
-        .clk_cfg         = LEDC_AUTO_CLK,
-    };
-    ledc_timer_config(&timer_cfg);
-
-    ledc_channel_config_t ch_cfg = {
-        .channel    = LEDC_CHANNEL_0,
-        .duty       = 512,  // 50% duty cycle
-        .gpio_num   = PIN_TEST_SIGNAL,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .hpoint     = 0,
-        .timer_sel  = LEDC_TIMER_0,
-    };
-    ledc_channel_config(&ch_cfg);
-    ESP_LOGI(TAG, "Señal de test 1kHz en GPIO%d", PIN_TEST_SIGNAL);
+    // Reemplazado por el nuevo componente osc_gen
+    // Inicializamos el generador en el pin de test
+    esp_err_t err = osc_gen_init(PIN_TEST_SIGNAL);
+    if (err == ESP_OK) {
+        // Configuramos una señal por defecto al arrancar (1 kHz, 50% duty)
+        osc_gen_set_square(1000, 50);
+        ESP_LOGI(TAG, "Generador de señal de test activado en GPIO%d", PIN_TEST_SIGNAL);
+    } else {
+        ESP_LOGE(TAG, "Fallo al inicializar generador de señal");
+    }
 }
 
 /* --------------------------------------------------------------------------

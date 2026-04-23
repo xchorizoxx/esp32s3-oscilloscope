@@ -143,8 +143,50 @@ class DeviceController(QObject):
         if not self.connected:
             return
         self.get_caps()
+        # BUG-06 FIX: push current UI config to firmware so hardware state
+        # matches what the UI shows. Firmware boots in Single CH mode=0,
+        # but the UI default is Dual CH mode=1 — without this push,
+        # CH2 is never sampled and always shows nothing.
+        self._push_config_to_firmware()
         # La senal info_received actualizara max_sample_rate, etc.
         self.config_changed.emit()
+
+    def _push_config_to_firmware(self) -> None:
+        """
+        Empuja la configuracion actual de la UI al firmware de forma secuencial.
+        Detiene el stream, aplica la config, y lo reinicia si estaba activo.
+        Previene el race condition del firmware entre CMD_SET_* y ADC reconfigure.
+        """
+        if not self.connected:
+            return
+
+        cfg = self.current_config
+        was_streaming = cfg.streaming
+
+        # Detener el stream antes de reconfigurar para evitar el race condition
+        # del firmware (adc_capture_task vs osc_adc_reconfigure)
+        if was_streaming:
+            self._send_command("CMD_STOP", wait_ack=True)
+
+        # Esperar a que el firmware procese la parada
+        import time
+        time.sleep(0.15)
+
+        # Enviar la config en orden (con ACK para garantizar que cada comando llego)
+        self._send_command(f"CMD_SET_MODE {cfg.mode}",        wait_ack=True)
+        self._send_command(f"CMD_SET_RATE {cfg.sample_rate}", wait_ack=True)
+        self._send_command(f"CMD_SET_FRAME {cfg.frame_size}", wait_ack=True)
+
+        edge_fw = _EDGE_UI_TO_FW.get(cfg.trig_edge, 3)
+        self._send_command(
+            f"CMD_SET_TRIG {cfg.trig_ch} {cfg.trig_mv:.1f} {edge_fw}",
+            wait_ack=True
+        )
+
+        # Reiniciar stream si estaba activo
+        if was_streaming:
+            time.sleep(0.05)
+            self._send_command("CMD_RUN", wait_ack=True)
 
     # ------------------------------------------------------------------
     # Envio de comandos sincronizado
@@ -194,36 +236,40 @@ class DeviceController(QObject):
 
     def start_stream(self) -> bool:
         ok, _ = self._send_command("CMD_STREAM_START")
+        if ok:
+            self.current_config.streaming = True
         return ok
 
     def stop_stream(self) -> bool:
         ok, _ = self._send_command("CMD_STREAM_STOP")
-        return ok
-
-    def single_shot(self) -> bool:
-        ok, _ = self._send_command("CMD_SINGLE_SHOT", wait_ack=False)
+        if ok:
+            self.current_config.streaming = False
         return ok
 
     def set_mode(self, mode: int) -> bool:
+        """Cambia el modo de adquisicion. Para el stream antes de reconfigurar el ADC."""
         if mode not in VALID_MODES:
             raise ValueError(f"Modo invalido: {mode}. Validos: {VALID_MODES}")
-        ok, err = self._send_command(f"CMD_SET_MODE {mode}")
-        if ok:
-            self.current_config.mode = mode
-            self.config_changed.emit()
-        return ok
+        prev = self.current_config.mode
+        self.current_config.mode = mode
+        if prev != mode:
+            self._safe_reconfig()
+        self.config_changed.emit()
+        return True
 
     def set_sample_rate(self, hz: int) -> bool:
+        """Cambia la tasa de muestreo. Para el stream antes de reconfigurar el ADC."""
         if not (MIN_SAMPLE_RATE <= hz <= MAX_SAMPLE_RATE):
             raise ValueError(
                 f"Sample rate invalido: {hz} Hz. "
                 f"Rango valido: {MIN_SAMPLE_RATE} - {MAX_SAMPLE_RATE} Hz"
             )
-        ok, err = self._send_command(f"CMD_SET_RATE {hz}")
-        if ok:
-            self.current_config.sample_rate = hz
-            self.config_changed.emit()
-        return ok
+        prev = self.current_config.sample_rate
+        self.current_config.sample_rate = hz
+        if prev != hz:
+            self._safe_reconfig()
+        self.config_changed.emit()
+        return True
 
     def set_trigger(self, ch: int, mv: float, edge_ui: int) -> bool:
         """
@@ -277,15 +323,43 @@ class DeviceController(QObject):
         return True
 
     def set_frame_size(self, n: int) -> bool:
+        """Cambia el tamano del frame. Para el stream antes de reconfigurar el ADC."""
         if n not in VALID_FRAME_SIZES:
             raise ValueError(
                 f"Frame size invalido: {n}. Validos: {VALID_FRAME_SIZES}"
             )
-        ok, err = self._send_command(f"CMD_SET_FRAME {n}")
-        if ok:
-            self.current_config.frame_size = n
-            self.config_changed.emit()
-        return ok
+        prev = self.current_config.frame_size
+        self.current_config.frame_size = n
+        if prev != n:
+            self._safe_reconfig()
+        self.config_changed.emit()
+        return True
+
+    def _safe_reconfig(self) -> None:
+        """
+        Stop → send config → restart stream.
+        Mitiga el race condition del firmware: adc_capture_task no puede estar
+        corriendo mientras osc_adc_reconfigure() se ejecuta desde el cmd_task.
+        """
+        import time
+        cfg = self.current_config
+        was_streaming = cfg.streaming
+
+        if was_streaming:
+            # Parar el stream y esperar que el firmware liquide el batch en curso
+            self._send_command("CMD_STREAM_STOP", wait_ack=True)
+            cfg.streaming = False
+            time.sleep(0.20)  # 200ms: da tiempo al ADC DMA de vaciar su buffer
+
+        # Enviar la config nueva
+        self._send_command(f"CMD_SET_MODE {cfg.mode}",        wait_ack=True)
+        self._send_command(f"CMD_SET_RATE {cfg.sample_rate}", wait_ack=True)
+        self._send_command(f"CMD_SET_FRAME {cfg.frame_size}", wait_ack=True)
+
+        if was_streaming:
+            time.sleep(0.05)
+            self._send_command("CMD_STREAM_START", wait_ack=True)
+            cfg.streaming = True
 
     def set_pre_trigger(self, pct: int) -> bool:
         """
@@ -320,3 +394,16 @@ class DeviceController(QObject):
 
     def get_status(self) -> bool:
         return self._send_command("CMD_GET_STATUS")[0]
+
+    # --- Signal Generator ---
+    def set_gen_start(self, freq_hz: int, duty_pct: int) -> bool:
+        if freq_hz < 1 or freq_hz > 150000:
+            raise ValueError(f"Frecuencia invalida: {freq_hz} Hz. Rango: 1-150000")
+        if duty_pct < 1 or duty_pct > 99:
+            raise ValueError(f"Duty cycle invalido: {duty_pct}%. Rango: 1-99")
+        ok, err = self._send_command(f"CMD_GEN_START {freq_hz} {duty_pct}")
+        return ok
+
+    def set_gen_stop(self) -> bool:
+        ok, err = self._send_command("CMD_GEN_STOP")
+        return ok

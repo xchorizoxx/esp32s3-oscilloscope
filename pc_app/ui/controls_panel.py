@@ -28,6 +28,10 @@ class ControlsPanel(QDockWidget):
     refresh_ports_requested = pyqtSignal()
     theme_toggle_requested = pyqtSignal(str)
 
+    # NEW: Signal Generator
+    gen_start_requested = pyqtSignal(int, int) # freq_hz, duty_pct
+    gen_stop_requested = pyqtSignal()
+
     mode_changed = pyqtSignal(int)
     rate_changed = pyqtSignal(int)
     frame_size_changed = pyqtSignal(int)
@@ -47,6 +51,7 @@ class ControlsPanel(QDockWidget):
 
     # NEW: UI Hold (freeze display without stopping hardware)
     ui_hold_changed = pyqtSignal(bool)
+    reload_requested = pyqtSignal()   # Reload App
 
     def __init__(self, title="Controls", parent=None):
         super().__init__(title, parent)
@@ -88,66 +93,117 @@ class ControlsPanel(QDockWidget):
 
         # Mode
         row_mode = QHBoxLayout()
-        row_mode.addWidget(QLabel("Mode:"))
+        lbl_mode = QLabel("Mode:")
+        lbl_mode.setToolTip(
+            "Dual CH: muestrea GPIO1 y GPIO2 alternando (rate por canal = rate/2).\n"
+            "Single CH: solo GPIO1, maxima velocidad.\n"
+            "Oversample: solo GPIO1 con promedio x16, mayor precision en senales lentas."
+        )
+        row_mode.addWidget(lbl_mode)
         self.cb_mode = QComboBox()
         self.cb_mode.addItem("Dual CH", 1)
         self.cb_mode.addItem("Single CH", 0)
         self.cb_mode.addItem("Oversample", 2)
+        self.cb_mode.setToolTip("Modo de adquisicion del ADC")
         row_mode.addWidget(self.cb_mode)
         l_acq.addLayout(row_mode)
 
-        # Rate (BUG-M03 FIX: eliminados 320000 y 640000)
+        # Rate: capped at 150 kHz (real hardware limit with ADC clock hack)
+        # BUG-05 FIX: 160 kHz removed (exceeds firmware max of 150 kHz)
+        # Firmware default is 83333 Hz (shown as "83 kHz")
         row_rate = QHBoxLayout()
         row_rate.addWidget(QLabel("Rate:"))
         self.cb_rate = QComboBox()
-        rates = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 125000, 160000]
-        for r in rates:
-            if r >= 1000:
-                self.cb_rate.addItem(f"{r//1000} kHz", r)
-            else:
-                self.cb_rate.addItem(f"{r} Hz", r)
+        rate_entries = [
+            (1000,   "1 kHz"),
+            (2000,   "2 kHz"),
+            (5000,   "5 kHz"),
+            (10000,  "10 kHz"),
+            (20000,  "20 kHz"),
+            (50000,  "50 kHz"),
+            (83333,  "83 kHz (FW default)"),
+            (100000, "100 kHz"),
+            (125000, "125 kHz"),
+            (150000, "150 kHz (max)"),
+        ]
+        for r_val, r_label in rate_entries:
+            self.cb_rate.addItem(r_label, r_val)
         self.cb_rate.setCurrentText("100 kHz")
+        self.cb_rate.setToolTip(
+            "Frecuencia de muestreo del ADC (rate de hardware).\n"
+            "En Dual CH: cada canal recibe rate/2.\n"
+            "Max hardware: 150 kHz. Default firmware: 83 kHz."
+        )
         row_rate.addWidget(self.cb_rate)
         l_acq.addLayout(row_rate)
 
         # Frame Size
         row_frame = QHBoxLayout()
-        row_frame.addWidget(QLabel("Frame:"))
+        lbl_frame = QLabel("Frame:")
+        lbl_frame.setToolTip(
+            "Numero de muestras por captura (profundidad de memoria).\n"
+            "Mayor frame = mas contexto temporal, pero mas latencia.\n"
+            "Cambiar el frame reinicia el ADC automaticamente."
+        )
+        row_frame.addWidget(lbl_frame)
         self.cb_frame = QComboBox()
+        # BUG: valores muy grandes (4096) con rate bajo pueden llenar el USB
         for f in [64, 128, 256, 512, 1024, 2048, 4096]:
             self.cb_frame.addItem(f"{f} pts", f)
-        self.cb_frame.setCurrentText("1024 pts")
+        self.cb_frame.setCurrentText("512 pts")   # Match firmware default
+        self.cb_frame.setToolTip("Muestras por frame — el firmware acumula este numero antes de enviar")
         row_frame.addWidget(self.cb_frame)
         l_acq.addLayout(row_frame)
 
-        # Timebase
+        # BUG-09 FIX: Timebase limitada a rango alcanzable por el hardware.
+        # 1-5 us/div requeriria >1 MHz de sample rate (imposible).
+        # 1-5 s/div tardaria minutos en llenar un frame de 512 pts a 1 kHz.
         row_tb = QHBoxLayout()
-        row_tb.addWidget(QLabel("T/div:"))
+        lbl_tb = QLabel("T/div:")
+        lbl_tb.setToolTip(
+            "Tiempo por division de cuadricula.\n"
+            "Ajusta la escala temporal de la pantalla (NO cambia el sample rate).\n"
+            "Para ver mas ciclos: aumentar T/div. Para ver mas detalle: reducir T/div."
+        )
+        row_tb.addWidget(lbl_tb)
         self.cb_timebase = QComboBox()
         timebases_us = [
-            1, 2, 5, 10, 20, 50, 100, 200, 500,
+            10, 20, 50, 100, 200, 500,
             1000, 2000, 5000, 10000, 20000, 50000,
-            100000, 200000, 500000, 1000000, 2000000, 5000000
+            100000, 200000, 500000
         ]
         for t in timebases_us:
             if t >= 1000000:
-                self.cb_timebase.addItem(f"{t/1000000:.1f} s", float(t))
+                self.cb_timebase.addItem(f"{t/1000000:.0f} s/div", float(t))
             elif t >= 1000:
-                self.cb_timebase.addItem(f"{t/1000:.1f} ms", float(t))
+                self.cb_timebase.addItem(f"{t/1000:.0f} ms/div", float(t))
             else:
-                self.cb_timebase.addItem(f"{t} us", float(t))
-        self.cb_timebase.setCurrentIndex(12)
+                self.cb_timebase.addItem(f"{t} us/div", float(t))
+        self.cb_timebase.setCurrentText("1000 us/div")  # 1 ms/div default
+        self.cb_timebase.setToolTip("Escala temporal por division")
         row_tb.addWidget(self.cb_timebase)
         l_acq.addLayout(row_tb)
 
         # Run/Stop/Single
         row_run = QHBoxLayout()
-        self.btn_run = QPushButton("RUN")
+        self.btn_run = QPushButton("\u25ba RUN")
         self.btn_run.setObjectName("btn_run")
-        self.btn_stop = QPushButton("STOP")
+        self.btn_run.setToolTip(
+            "RUN: inicia el streaming continuo.\n"
+            "El ESP32 captura y envia frames continuamente."
+        )
+        self.btn_stop = QPushButton("\u25a0 STOP")
         self.btn_stop.setObjectName("btn_stop")
+        self.btn_stop.setToolTip(
+            "STOP: detiene el streaming y congela la pantalla.\n"
+            "La ultima captura queda visible."
+        )
         self.btn_single = QPushButton("SINGLE")
         self.btn_single.setObjectName("btn_single")
+        self.btn_single.setToolTip(
+            "SINGLE: captura un unico frame cuando se detecta el trigger y para.\n"
+            "Util para capturar eventos unicos (pulsos, glitches)."
+        )
         row_run.addWidget(self.btn_run)
         row_run.addWidget(self.btn_stop)
         row_run.addWidget(self.btn_single)
@@ -193,16 +249,24 @@ class ControlsPanel(QDockWidget):
         l_disp.addLayout(row_dmode)
 
         # Roll mode
-        self.chk_roll = QCheckBox("Roll Mode (Continuous)")
+        self.chk_roll = QCheckBox("Roll Mode")
+        self.chk_roll.setToolTip(
+            "Roll Mode: la pantalla se desplaza continuamente como un ECG.\n"
+            "Ideal para senales lentas (< 1 Hz) que no se pueden triggerear facilmente."
+        )
         self.chk_pause_roll = QCheckBox("Pause Roll")
+        self.chk_pause_roll.setToolTip("Congela el scroll del Roll Mode sin detener el hardware")
         self.chk_pause_roll.setEnabled(False)
         l_disp.addWidget(self.chk_roll)
         l_disp.addWidget(self.chk_pause_roll)
 
         # BUG-M05 FIX: Checkboxes mutuamente excluyentes
         self.chk_pers = QCheckBox("Persistence")
+        self.chk_pers.setToolTip("Superpone los ultimos 5 frames con transparencia decreciente")
         self.chk_avg = QCheckBox("Average (n=4)")
+        self.chk_avg.setToolTip("Promedia los ultimos 4 frames para reducir ruido")
         self.chk_env = QCheckBox("Envelope")
+        self.chk_env.setToolTip("Muestra la envolvente (min/max) de los ultimos 4 frames")
         l_disp.addWidget(self.chk_pers)
         l_disp.addWidget(self.chk_avg)
         l_disp.addWidget(self.chk_env)
@@ -218,13 +282,64 @@ class ControlsPanel(QDockWidget):
         l_cur.addWidget(self.chk_cursor_v)
         self.layout.addWidget(grp_cursor)
 
-        # --- 7. Theme ---
-        grp_theme = QGroupBox("Theme")
-        l_theme = QHBoxLayout(grp_theme)
+        # --- 7. Signal Generator ---
+        grp_gen = QGroupBox("Signal Gen (GPIO3)")
+        l_gen = QVBoxLayout(grp_gen)
+        
+        # Freq
+        row_gfreq = QHBoxLayout()
+        row_gfreq.addWidget(QLabel("Freq:"))
+        self.spin_gen_freq = QDoubleSpinBox()
+        self.spin_gen_freq.setRange(1, 150000)
+        self.spin_gen_freq.setSuffix(" Hz")
+        self.spin_gen_freq.setDecimals(0)
+        self.spin_gen_freq.setValue(1000)
+        row_gfreq.addWidget(self.spin_gen_freq)
+        l_gen.addLayout(row_gfreq)
+
+        # Duty
+        row_gduty = QHBoxLayout()
+        row_gduty.addWidget(QLabel("Duty:"))
+        self.spin_gen_duty = QDoubleSpinBox()
+        self.spin_gen_duty.setRange(10, 90)
+        self.spin_gen_duty.setSuffix(" %")
+        self.spin_gen_duty.setDecimals(0)
+        self.spin_gen_duty.setValue(50)
+        row_gduty.addWidget(self.spin_gen_duty)
+        l_gen.addLayout(row_gduty)
+
+        # Buttons
+        row_gbtn = QHBoxLayout()
+        self.btn_gen_start = QPushButton("START")
+        self.btn_gen_stop = QPushButton("STOP")
+        self.btn_gen_stop.setEnabled(False)
+        row_gbtn.addWidget(self.btn_gen_start)
+        row_gbtn.addWidget(self.btn_gen_stop)
+        l_gen.addLayout(row_gbtn)
+        
+        self.layout.addWidget(grp_gen)
+
+        # --- 8. Theme + Reload ---
+        grp_theme = QGroupBox("App")
+        l_theme = QVBoxLayout(grp_theme)
+
+        row_themes = QHBoxLayout()
         self.btn_theme_dark = QPushButton("Dark")
+        self.btn_theme_dark.setToolTip("Cambiar al tema oscuro")
         self.btn_theme_light = QPushButton("Light")
-        l_theme.addWidget(self.btn_theme_dark)
-        l_theme.addWidget(self.btn_theme_light)
+        self.btn_theme_light.setToolTip("Cambiar al tema claro")
+        row_themes.addWidget(self.btn_theme_dark)
+        row_themes.addWidget(self.btn_theme_light)
+        l_theme.addLayout(row_themes)
+
+        # Reload App button
+        self.btn_reload = QPushButton("\u21bb Reload App")
+        self.btn_reload.setObjectName("btn_reload")
+        self.btn_reload.setToolTip(
+            "Reinicia la aplicacion Python completamente.\n"
+            "Util para aplicar cambios de configuracion o limpiar el estado."
+        )
+        l_theme.addWidget(self.btn_reload)
         self.layout.addWidget(grp_theme)
 
         # Spacer final
@@ -263,8 +378,13 @@ class ControlsPanel(QDockWidget):
         self.chk_cursor_t.toggled.connect(self.time_cursors_toggled.emit)
         self.chk_cursor_v.toggled.connect(self.volt_cursors_toggled.emit)
 
+        # Generator
+        self.btn_gen_start.clicked.connect(self._on_gen_start)
+        self.btn_gen_stop.clicked.connect(self._on_gen_stop)
+
         self.btn_theme_dark.clicked.connect(lambda: self.theme_toggle_requested.emit('dark'))
         self.btn_theme_light.clicked.connect(lambda: self.theme_toggle_requested.emit('light'))
+        self.btn_reload.clicked.connect(self.reload_requested.emit)
 
         # Auto-refresh ports
         self._port_timer = QTimer(self)

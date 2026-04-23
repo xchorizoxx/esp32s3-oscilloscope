@@ -33,3 +33,5 @@ pc_app/dist/
 pc_app/*.spec
 !pc_app/build.spec
 
+# Other
+cardputer-oscilloscope-main/

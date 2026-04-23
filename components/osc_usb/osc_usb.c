@@ -3,6 +3,7 @@
 #include "osc_config.h"
 #include "osc_adc.h"
 #include "osc_dsp.h"
+#include "osc_gen.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -218,6 +219,28 @@ static void process_command(const char *cmd)
         } else {
             osc_usb_send_nak(cmd, "argumento requerido: 0 o 1");
         }
+        return;
+    }
+
+    // CMD_GEN_START <freq> <duty>
+    if (strncmp(cmd, "CMD_GEN_START", 13) == 0) {
+        uint32_t freq = 0;
+        uint32_t duty = 0;
+        if (sscanf(cmd + 13, " %lu %lu", &freq, &duty) == 2) {
+            if (osc_gen_set_square(freq, duty) == ESP_OK)
+                osc_usb_send_ack(cmd);
+            else
+                osc_usb_send_nak(cmd, "parametros invalidos");
+        } else {
+            osc_usb_send_nak(cmd, "2 argumentos requeridos: freq duty");
+        }
+        return;
+    }
+
+    // CMD_GEN_STOP
+    if (strcmp(cmd, "CMD_GEN_STOP") == 0) {
+        osc_gen_stop();
+        osc_usb_send_ack(cmd);
         return;
     }
 
