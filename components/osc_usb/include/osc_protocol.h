@@ -99,7 +99,7 @@ extern "C" {
 
 // Máximo tamaño de un frame de datos (para dimensionar buffers)
 // 16 (header) + 2*512*2 (dual 512 samples) + 1 (CRC) = 2065 bytes
-#define OSC_MAX_FRAME_BYTES 4096
+#define OSC_MAX_FRAME_BYTES 16384
 
 /* =========================================================================
  * Comandos ASCII (PC → ESP32, terminados en '\n')

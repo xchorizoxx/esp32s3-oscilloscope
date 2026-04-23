@@ -234,9 +234,22 @@ class FrameParser:
         }
 
     def _parse_measurements(self) -> Optional[dict]:
-        # sync(2)+type(1)+flags(1)+ch0(45)+ch1(45)+CRC(1) = 95
-        TOTAL = 2 + 1 + 1 + _MEAS_CH_SIZE + _MEAS_CH_SIZE + 1
-        raw = self._check_and_consume(TOTAL)
+        # Verificar que el buffer tenga al menos la cabecera (4 bytes)
+        if len(self._buf) < 4:
+            return None
+            
+        flags     = self._buf[3]
+        ch0_valid = bool(flags & 0x01)
+        ch1_valid = bool(flags & 0x02)
+        
+        # Calcular dinámicamente cuánto debemos leer
+        # sync(2) + type(1) + flags(1) + [ch0(45)] + [ch1(45)] + CRC(1)
+        expected_size = 4
+        if ch0_valid: expected_size += _MEAS_CH_SIZE
+        if ch1_valid: expected_size += _MEAS_CH_SIZE
+        expected_size += 1
+        
+        raw = self._check_and_consume(expected_size)
         if raw is None:
             return None
         if raw is False:

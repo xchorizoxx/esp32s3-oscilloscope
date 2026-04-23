@@ -89,7 +89,7 @@ static void tusb_cdc_line_state_callback(int itf, cdcacm_event_t *event)
 {
     bool dtr = event->line_state_changed_data.dtr;
     bool rts = event->line_state_changed_data.rts;
-    s_connected = dtr || rts;
+    s_connected = dtr; // Solo DTR es confiable en la mayoría de drivers Linux/Windows
     ESP_LOGI(TAG, "USB CDC %s", s_connected ? "conectado" : "desconectado");
     if (!s_connected) {
         // Detener stream al desconectar

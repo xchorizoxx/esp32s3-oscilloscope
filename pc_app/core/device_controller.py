@@ -166,7 +166,7 @@ class DeviceController(QObject):
         # Detener el stream antes de reconfigurar para evitar el race condition
         # del firmware (adc_capture_task vs osc_adc_reconfigure)
         if was_streaming:
-            self._send_command("CMD_STOP", wait_ack=True)
+            self._send_command("CMD_STREAM_STOP", wait_ack=True)
 
         # Esperar a que el firmware procese la parada
         import time
@@ -186,7 +186,7 @@ class DeviceController(QObject):
         # Reiniciar stream si estaba activo
         if was_streaming:
             time.sleep(0.05)
-            self._send_command("CMD_RUN", wait_ack=True)
+            self._send_command("CMD_STREAM_START", wait_ack=True)
 
     # ------------------------------------------------------------------
     # Envio de comandos sincronizado

@@ -63,10 +63,9 @@ static osc_sample_t *s_sample_buf = NULL;
 typedef struct {
     size_t count;
     uint32_t timestamp_us;
+    osc_sample_t samples[SAMPLE_BUF_SIZE]; // Pasar datos por valor evita race conditions
 } adc_batch_t;
 static QueueHandle_t s_adc_queue = NULL;
-static osc_sample_t  s_adc_staging[SAMPLE_BUF_SIZE];
-static SemaphoreHandle_t s_staging_mutex = NULL;
 
 /* --------------------------------------------------------------------------
  * Señal de test (PWM 1 kHz en GPIO3, para auto-test sin señal externa)
@@ -150,18 +149,17 @@ static void adc_capture_task(void *arg)
                                               &count, 50);
         if (ret == ESP_ERR_TIMEOUT || count == 0) continue;
 
-        // Copiar al staging buffer para DSP
-        if (xSemaphoreTake(s_staging_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            size_t copy = count < SAMPLE_BUF_SIZE ? count : SAMPLE_BUF_SIZE;
-            memcpy(s_adc_staging, s_sample_buf, copy * sizeof(osc_sample_t));
-            xSemaphoreGive(s_staging_mutex);
-
-            adc_batch_t batch = {
-                .count        = copy,
-                .timestamp_us = s_sample_buf[0].timestamp_us,
-            };
-            // No bloquear si el queue está lleno (la DSP task está ocupada)
-            xQueueSend(s_adc_queue, &batch, 0);
+        // Enviar batch al DSP
+        size_t copy_count = count < SAMPLE_BUF_SIZE ? count : SAMPLE_BUF_SIZE;
+        adc_batch_t batch = {
+            .count        = copy_count,
+            .timestamp_us = s_sample_buf[0].timestamp_us,
+        };
+        memcpy(batch.samples, s_sample_buf, copy_count * sizeof(osc_sample_t));
+        
+        // No bloquear si el queue está lleno (la DSP task está ocupada)
+        if (xQueueSend(s_adc_queue, &batch, 0) != pdTRUE) {
+            // ESP_LOGD(TAG, "DSP queue full, dropping batch");
         }
     }
 }
@@ -211,14 +209,12 @@ static void dsp_process_task(void *arg)
             continue;
         }
 
-        // Copiar batch del staging buffer al acumulador
-        if (xSemaphoreTake(s_staging_mutex, pdMS_TO_TICKS(5)) != pdTRUE) continue;
+        // Copiar batch al acumulador local
         size_t to_copy = batch.count;
         if (frame_fill + to_copy > cfg.frame_size) {
             to_copy = cfg.frame_size - frame_fill;
         }
-        memcpy(&frame_accum[frame_fill], s_adc_staging, to_copy * sizeof(osc_sample_t));
-        xSemaphoreGive(s_staging_mutex);
+        memcpy(&frame_accum[frame_fill], batch.samples, to_copy * sizeof(osc_sample_t));
 
         frame_fill += to_copy;
 
@@ -302,23 +298,18 @@ void app_main(void)
     ESP_ERROR_CHECK(osc_dsp_init());
     ESP_ERROR_CHECK(osc_usb_init());
 
-    // --- Allocar buffers en PSRAM ---
+    // --- Allocar buffers en RAM Interna (Requerido para DMA en ESP32-S3) ---
     s_sample_buf = (osc_sample_t *)heap_caps_malloc(
-        SAMPLE_BUF_SIZE * sizeof(osc_sample_t), MALLOC_CAP_SPIRAM);
+        SAMPLE_BUF_SIZE * sizeof(osc_sample_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!s_sample_buf) {
-        ESP_LOGE(TAG, "Sin memoria PSRAM para sample buffer");
-        s_sample_buf = (osc_sample_t *)malloc(SAMPLE_BUF_SIZE * sizeof(osc_sample_t));
-        if (!s_sample_buf) {
-            ESP_LOGE(TAG, "FATAL: sin memoria");
-            abort();
-        }
+        ESP_LOGE(TAG, "FATAL: No hay memoria interna para DMA");
+        abort();
     }
 
     // --- Sincronización entre tareas ---
-    s_adc_queue     = xQueueCreate(8, sizeof(adc_batch_t));
-    s_staging_mutex = xSemaphoreCreateMutex();
-    if (!s_adc_queue || !s_staging_mutex) {
-        ESP_LOGE(TAG, "FATAL: no se pudo crear queue/mutex");
+    s_adc_queue = xQueueCreate(8, sizeof(adc_batch_t));
+    if (!s_adc_queue) {
+        ESP_LOGE(TAG, "FATAL: no se pudo crear queue");
         abort();
     }
 
