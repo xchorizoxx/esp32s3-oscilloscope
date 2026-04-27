@@ -478,18 +478,34 @@ class WaveformWidget(QWidget):
     # Rendering
     # ==================================================================
 
-    def update_frame(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray):
+    def update_frame(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray, trigger_index: int = 0):
         """Render a waveform frame. In roll mode, accumulates data and scrolls."""
         if self.roll_mode:
             self._update_roll(t_us, ch1_mv, ch2_mv)
             return
 
+        # BUG FIX: Sincronismo - Desplazar eje de tiempo según el trigger_index
+        # Si trigger_index es p.ej. 512, t_us[512] pasará a ser el tiempo 0 (centro)
+        if len(t_us) > trigger_index >= 0:
+            t_aligned = t_us - t_us[trigger_index]
+        else:
+            t_aligned = t_us
+
+        # CH1
         if self.ch1_visible and ch1_mv is not None:
             data = self._apply_pga(ch1_mv, 0) + self.ch1_offset_mv
-            self.curve_ch1.setData(t_us, data)
+            self.curve_ch1.setData(t_aligned, data)
+        else:
+            # BUG FIX: Limpiar traza si el canal no es válido/visible
+            self.curve_ch1.setData([], [])
+
+        # CH2
         if self.ch2_visible and ch2_mv is not None:
             data = self._apply_pga(ch2_mv, 1) + self.ch2_offset_mv
-            self.curve_ch2.setData(t_us, data)
+            self.curve_ch2.setData(t_aligned, data)
+        else:
+            # BUG FIX: Limpiar traza si el canal no es válido/visible
+            self.curve_ch2.setData([], [])
 
     def _update_roll(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray):
         """Roll mode: append new data and scroll the view."""

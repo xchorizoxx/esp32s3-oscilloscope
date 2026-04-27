@@ -34,18 +34,22 @@ static const int s_atten_full_scale_mv[4] = {
 // Caché de atenuación para evitar mutex en el hot path
 static uint8_t s_current_atten[2] = {3, 3};
 
+/* --- Factores de Corrección --- */
+#define OSC_ADC_CORRECTION_FACTOR  1.037f   // Ajuste para 12dB (3.268V / 3.15V)
+#define OSC_ADC_SATURATION_MV      2500     // Punto donde empieza la corrección no-lineal
+
 /* Estado del filtro y decimación — se inicializa/resetea en osc_adc_start() */
-static int16_t  s_prev_ch0[2]  = {0, 0};
-static int16_t  s_prev_ch1[2]  = {0, 0};
-static uint32_t s_skip_count   = 0;
-static int16_t  s_last_ch0     = 0;
-static bool     s_has_ch0      = false;
+static int32_t  s_acc_ch0 = 0;
+static int32_t  s_acc_ch1 = 0;
+static uint32_t s_acc_count = 0;
+static int16_t  s_last_ch0 = 0;
+static bool     s_has_ch0  = false;
 
 static void reset_filter_state(void)
 {
-    s_prev_ch0[0] = s_prev_ch0[1] = 0;
-    s_prev_ch1[0] = s_prev_ch1[1] = 0;
-    s_skip_count = 0;
+    s_acc_ch0 = 0;
+    s_acc_ch1 = 0;
+    s_acc_count = 0;
     s_last_ch0   = 0;
     s_has_ch0    = false;
 }
@@ -267,6 +271,12 @@ static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx)
         int full_scale = s_atten_full_scale_mv[atten_idx];
         voltage_mv = (int)((raw * (long)full_scale) / 4095);
     }
+
+    // Aplicar corrección si estamos en 12dB (index 3) y el voltaje es alto (>2500mV)
+    if (s_current_atten[ch_idx] == 3 && voltage_mv > OSC_ADC_SATURATION_MV) {
+        voltage_mv = (int)(voltage_mv * OSC_ADC_CORRECTION_FACTOR);
+    }
+
     return (int16_t)(voltage_mv * 10);
 }
 
@@ -321,15 +331,14 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
         uint16_t raw = p->type2.data;
 
         if (!dual) {
-            // Decimar si es necesario
-            if (++s_skip_count < skip_factor) continue;
-            s_skip_count = 0;
+            s_acc_ch0 += raw;
+            if (++s_acc_count < skip_factor) continue;
 
-            // Single channel: cada resultado es ch0
-            int16_t cur = raw_to_mv10(raw, 0);
-            int16_t filtered = median3_i16(s_prev_ch0[0], s_prev_ch0[1], cur);
-            s_prev_ch0[0] = s_prev_ch0[1];
-            s_prev_ch0[1] = cur;
+            uint16_t avg_raw = (uint16_t)(s_acc_ch0 / s_acc_count);
+            s_acc_ch0 = 0;
+            s_acc_count = 0;
+
+            int16_t filtered = raw_to_mv10(avg_raw, 0);
 
             buf[written].ch0_mv10      = filtered;
             buf[written].ch1_mv10      = 0;
@@ -338,21 +347,25 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
         } else {
             // Dual channel: el ADC alterna CH0 y CH1
             if (ch == 0) {
-                s_last_ch0 = raw_to_mv10(raw, 0);
-                s_has_ch0  = true;
-            } else if (ch == 1 && s_has_ch0) {
-                // Decimar par completo
-                if (++s_skip_count < skip_factor) {
-                    s_has_ch0 = false;
-                    continue;
-                }
-                s_skip_count = 0;
+                s_acc_ch0 += raw;
+            } else if (ch == 1) {
+                s_acc_ch1 += raw;
+                s_has_ch0 = true; // Marcamos que tenemos al menos un par en proceso
+            }
 
-                int16_t mv10_ch1 = raw_to_mv10(raw, 1);
-                buf[written].ch0_mv10     = s_last_ch0;
-                buf[written].ch1_mv10     = mv10_ch1;
-                buf[written].timestamp_us = timestamp + (uint32_t)(written * 1000000UL / cfg.sample_rate_hz);
+            // Cuando completamos el ciclo de acumulación para ambos canales
+            if (s_has_ch0 && ++s_acc_count >= skip_factor) {
+                uint16_t avg0 = (uint16_t)(s_acc_ch0 / skip_factor);
+                uint16_t avg1 = (uint16_t)(s_acc_ch1 / skip_factor);
+                
+                buf[written].ch0_mv10 = raw_to_mv10(avg0, 0);
+                buf[written].ch1_mv10 = raw_to_mv10(avg1, 1);
+                buf[written].timestamp_us = timestamp + (uint32_t)(written * 1000000UL / (cfg.sample_rate_hz));
+                
                 written++;
+                s_acc_ch0 = 0;
+                s_acc_ch1 = 0;
+                s_acc_count = 0;
                 s_has_ch0 = false;
             }
         }

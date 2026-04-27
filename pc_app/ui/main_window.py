@@ -395,11 +395,13 @@ class MainWindow(QMainWindow):
 
         # 6. Waveform Render
         mode = self.waveform_widget.display_mode
+        trig_idx = latest.get('trigger_index', 0)
+
         if self.waveform_widget.roll_mode:
             # En Roll mode, forzamos render normal acumulativo y saltamos otros modos
-            self.waveform_widget.update_frame(t_us, ch1, ch2)
+            self.waveform_widget.update_frame(t_us, ch1, ch2, trig_idx)
         elif mode == 'normal':
-            self.waveform_widget.update_frame(t_us, ch1, ch2)
+            self.waveform_widget.update_frame(t_us, ch1, ch2, trig_idx)
         elif mode == 'average':
             a1 = self.data_store.get_average(4, 'ch0_mv')
             a2 = self.data_store.get_average(4, 'ch1_mv')
@@ -408,7 +410,7 @@ class MainWindow(QMainWindow):
                 a1 = self._apply_ac_coupling(a1, 0, rate)
             if a2 is not None and self._ac_couple_state[1]['mode'] != 'DC':
                 a2 = self._apply_ac_coupling(a2, 1, rate)
-            self.waveform_widget.update_frame(t_us, a1, a2)
+            self.waveform_widget.update_frame(t_us, a1, a2, trig_idx)
         elif mode == 'envelope':
             e1 = self.data_store.get_envelope(4, 'ch0_mv')
             e2 = self.data_store.get_envelope(4, 'ch1_mv')
