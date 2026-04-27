@@ -16,7 +16,7 @@ esp_err_t osc_gen_init(int gpio_num);
 
 /**
  * @brief Configura e inicia la generación de una onda cuadrada (PWM).
- * @param freq_hz Frecuencia en Hz (1 a 100000).
+ * @param freq_hz Frecuencia en Hz (1 a 150000).
  * @param duty_pct Ciclo de trabajo en % (10 a 90).
  * @return ESP_OK si fue exitoso, ESP_ERR_INVALID_ARG si los parámetros están fuera de rango.
  */

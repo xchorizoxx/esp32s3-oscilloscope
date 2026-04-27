@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -254,7 +255,8 @@ esp_err_t osc_adc_reconfigure(void)
 {
     ESP_LOGI(TAG, "Reconfigurando ADC...");
     osc_adc_stop();
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Delay activo corto para que el DMA termine de vaciar sin ceder CPU
+    esp_rom_delay_us(500); 
     esp_err_t ret = osc_adc_init();
     if (ret == ESP_OK) ret = osc_adc_start();
     return ret;

@@ -346,12 +346,9 @@ void app_main(void)
         24, NULL, 1  // Core 1
     );
 
-    // Heartbeat cada 1s para indicar que el sistema está vivo
+    // Heartbeat cada 1s para indicar que el sistema está vivo (Solo Log UART)
     while (1) {
-        led_set(true);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        led_set(false);
-        vTaskDelay(pdMS_TO_TICKS(950));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         ESP_LOGD(TAG, "Heap libre: %lu KB | PSRAM libre: %lu KB",
                  esp_get_free_heap_size() / 1024,
                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);

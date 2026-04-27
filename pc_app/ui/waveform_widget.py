@@ -567,6 +567,9 @@ class WaveformWidget(QWidget):
             self._roll_ch2 = np.array([], dtype=np.float32)
             self._roll_t_offset = 0.0
             self._last_dt_us = 10.0
+            # BUG-PC-07 FIX: Limpiar curvas inmediatamente para evitar "ghost frame"
+            self.curve_ch1.setData([], [])
+            self.curve_ch2.setData([], [])
             self._update_ranges()
 
     def update_envelope(self, t_us, ch1_min, ch1_max, ch2_min, ch2_max):

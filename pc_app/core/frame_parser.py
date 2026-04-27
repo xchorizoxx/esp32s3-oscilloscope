@@ -267,8 +267,16 @@ class FrameParser:
                       'rise_time_us', 'fall_time_us']
             return {k: v for k, v in zip(keys, fields)} | {'valid': bool(valid)}
 
-        ch0 = parse_ch(4)             if ch0_valid else None
-        ch1 = parse_ch(4 + _MEAS_CH_SIZE) if ch1_valid else None
+        offset = 4
+        ch0 = None
+        ch1 = None
+
+        if ch0_valid:
+            ch0 = parse_ch(offset)
+            offset += _MEAS_CH_SIZE
+
+        if ch1_valid:
+            ch1 = parse_ch(offset)
 
         return {'type': FRAME_MEASUREMENTS, 'flags': flags, 'ch0': ch0, 'ch1': ch1}
 

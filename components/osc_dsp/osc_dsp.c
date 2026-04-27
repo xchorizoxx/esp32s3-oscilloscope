@@ -105,6 +105,23 @@ esp_err_t osc_dsp_compute_measurements(const int16_t *samples_mv10, size_t count
         if (rise_start >= 0 && rise_end > rise_start && sample_rate > 0) {
             meas->rise_time_us = (float)(rise_end - rise_start) * 1e6f / sample_rate;
         }
+
+        // --- Fall time (90% a 10% del rango) ---
+        int fall_start = -1, fall_end = -1;
+        for (size_t i = 1; i < count; i++) {
+            // Buscar flanco descendente: crossing de high90 hacia abajo
+            if (fall_start < 0 && samples_mv10[i-1] >= high90 && samples_mv10[i] < high90) {
+                fall_start = i;
+            }
+            // Buscar cruce de low10 hacia abajo (completar el flanco)
+            if (fall_start >= 0 && fall_end < 0 && samples_mv10[i] <= low10) {
+                fall_end = i;
+            }
+            if (fall_start >= 0 && fall_end >= 0) break;
+        }
+        if (fall_start >= 0 && fall_end > fall_start && sample_rate > 0) {
+            meas->fall_time_us = (float)(fall_end - fall_start) * 1e6f / sample_rate;
+        }
     }
 
     meas->valid = true;

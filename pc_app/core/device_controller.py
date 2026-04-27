@@ -15,7 +15,7 @@ import logging
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 import serial.tools.list_ports
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QThread
 from .serial_reader import SerialReader
 
 # Configurar logging para que los mensajes sean visibles en la consola
@@ -146,24 +146,37 @@ class DeviceController(QObject):
             self.firmware_version = "Unknown"
             self.port_name = ""
 
+class _ConfigPushWorker(QObject):
+    """Worker que corre en hilo separado para evitar bloquear la UI."""
+    finished = pyqtSignal()
+
+    def __init__(self, controller: 'DeviceController', mode: str = "config") -> None:
+        super().__init__()
+        self._ctrl = controller
+        self._mode = mode
+
+    def run(self) -> None:
+        if self._mode == "config":
+            self._ctrl._push_config_blocking()
+        elif self._mode == "atten":
+            self._ctrl._push_atten_blocking()
+        self.finished.emit()
+
+class DeviceController(QObject):
+    # ... (rest of class until _sync_state_on_connect)
+
     def _sync_state_on_connect(self) -> None:
         """Lee capabilities del firmware y sincroniza la UI."""
         if not self.connected:
             return
         self.get_caps()
-        # BUG-06 FIX: push current UI config to firmware so hardware state
-        # matches what the UI shows. Firmware boots in Single CH mode=0,
-        # but the UI default is Dual CH mode=1 — without this push,
-        # CH2 is never sampled and always shows nothing.
-        self._push_config_to_firmware()
-        # La senal info_received actualizara max_sample_rate, etc.
+        # BUG-06 FIX: push current UI config to firmware
+        self.push_config_to_device()
         self.config_changed.emit()
 
-    def _push_config_to_firmware(self) -> None:
+    def _push_config_blocking(self) -> None:
         """
-        Empuja la configuracion actual de la UI al firmware de forma secuencial.
-        Detiene el stream, aplica la config, y lo reinicia si estaba activo.
-        Previene el race condition del firmware entre CMD_SET_* y ADC reconfigure.
+        Lógica de push secuencial con sleeps — corre en hilo worker.
         """
         if not self.connected:
             return
@@ -171,16 +184,11 @@ class DeviceController(QObject):
         cfg = self.current_config
         was_streaming = cfg.streaming
 
-        # Detener el stream antes de reconfigurar para evitar el race condition
-        # del firmware (adc_capture_task vs osc_adc_reconfigure)
         if was_streaming:
             self._send_command("CMD_STREAM_STOP", wait_ack=True)
 
-        # Esperar a que el firmware procese la parada
-        import time
         time.sleep(0.15)
 
-        # Enviar la config en orden (con ACK para garantizar que cada comando llego)
         self._send_command(f"CMD_SET_MODE {cfg.mode}",        wait_ack=True)
         self._send_command(f"CMD_SET_RATE {cfg.sample_rate}", wait_ack=True)
         self._send_command(f"CMD_SET_FRAME {cfg.frame_size}", wait_ack=True)
@@ -191,10 +199,45 @@ class DeviceController(QObject):
             wait_ack=True
         )
 
-        # Reiniciar stream si estaba activo
         if was_streaming:
             time.sleep(0.05)
             self._send_command("CMD_STREAM_START", wait_ack=True)
+
+    def push_config_to_device(self) -> None:
+        """Despacha el push a un hilo worker para no bloquear la UI."""
+        if not self.connected:
+            return
+        self._push_thread = QThread()
+        self._push_worker = _ConfigPushWorker(self, mode="config")
+        self._push_worker.moveToThread(self._push_thread)
+        self._push_thread.started.connect(self._push_worker.run)
+        self._push_worker.finished.connect(self._push_thread.quit)
+        self._push_worker.finished.connect(self._push_worker.deleteLater)
+        self._push_thread.finished.connect(self._push_thread.deleteLater)
+        self._push_thread.start()
+
+    def _push_atten_blocking(self) -> None:
+        """Push de atenuación en hilo worker."""
+        if not self.connected:
+            return
+        # Nota: asumiendo que push_atten_to_device usa sleeps similares
+        # Si no los tiene aún, se pueden añadir aquí.
+        self._send_command(f"CMD_SET_ATTEN 0 {self.current_config.ch1_atten}", wait_ack=True)
+        time.sleep(0.05)
+        self._send_command(f"CMD_SET_ATTEN 1 {self.current_config.ch2_atten}", wait_ack=True)
+
+    def push_atten_to_device(self) -> None:
+        """Despacha el push de atenuación a un hilo worker."""
+        if not self.connected:
+            return
+        self._atten_thread = QThread()
+        self._atten_worker = _ConfigPushWorker(self, mode="atten")
+        self._atten_worker.moveToThread(self._atten_thread)
+        self._atten_thread.started.connect(self._atten_worker.run)
+        self._atten_worker.finished.connect(self._atten_thread.quit)
+        self._atten_worker.finished.connect(self._atten_worker.deleteLater)
+        self._atten_thread.finished.connect(self._atten_thread.deleteLater)
+        self._atten_thread.start()
 
     # ------------------------------------------------------------------
     # Envio de comandos sincronizado
