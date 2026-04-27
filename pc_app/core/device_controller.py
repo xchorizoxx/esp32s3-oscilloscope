@@ -11,11 +11,18 @@ Mejoras:
 
 import threading
 import time
+import logging
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 import serial.tools.list_ports
 from PyQt6.QtCore import QObject, pyqtSignal
 from .serial_reader import SerialReader
+
+# Configurar logging para que los mensajes sean visibles en la consola
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+)
 
 # ---------------------------------------------------------------------------
 # Validacion — limites del protocolo y del ESP32-S3
@@ -56,6 +63,7 @@ class OscConfig:
     ch1_atten_idx: int = 3
     ch0_coupling: str = "AC+DC"      # Modos locales: AC+DC, AC, DC, GND
     ch1_coupling: str = "AC+DC"
+    streaming: bool = False
 
 
 class DeviceController(QObject):

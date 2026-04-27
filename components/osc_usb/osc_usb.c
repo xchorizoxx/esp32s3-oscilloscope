@@ -89,7 +89,7 @@ static void tusb_cdc_line_state_callback(int itf, cdcacm_event_t *event)
 {
     bool dtr = event->line_state_changed_data.dtr;
     bool rts = event->line_state_changed_data.rts;
-    s_connected = dtr; // Solo DTR es confiable en la mayoría de drivers Linux/Windows
+    s_connected = dtr || rts; // DTR o RTS indican conexión activa — compatibilidad ampliada
     ESP_LOGI(TAG, "USB CDC %s", s_connected ? "conectado" : "desconectado");
     if (!s_connected) {
         // Detener stream al desconectar
@@ -357,11 +357,30 @@ static size_t build_measurements_frame(const osc_frame_t *frame, uint8_t *out_bu
 static esp_err_t usb_write_raw(const uint8_t *buf, size_t len)
 {
     if (!s_connected || !tud_cdc_n_connected(0)) return ESP_ERR_INVALID_STATE;
-    size_t queued = tinyusb_cdcacm_write_queue(0, buf, len);
-    if (queued > 0) {
-        tinyusb_cdcacm_write_flush(0, pdMS_TO_TICKS(10));
+    
+    size_t total_sent = 0;
+    uint32_t start_time = esp_timer_get_time() / 1000;
+    
+    while (total_sent < len && s_connected) {
+        size_t to_write = len - total_sent;
+        size_t queued = tinyusb_cdcacm_write_queue(0, buf + total_sent, to_write);
+        
+        if (queued > 0) {
+            total_sent += queued;
+            tinyusb_cdcacm_write_flush(0, 0); // Flush asincrónico para maximizar throughput
+        } else {
+            // Cola llena o busy, esperar un poco para no saturar CPU
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        
+        // Timeout de seguridad de 100ms para evitar bloqueos infinitos si el host deja de leer
+        if ((esp_timer_get_time() / 1000) - start_time > 100) {
+            ESP_LOGW(TAG, "USB TX timeout (%zu/%zu sent)", total_sent, len);
+            return ESP_FAIL;
+        }
     }
-    return (queued == len) ? ESP_OK : ESP_FAIL;
+    
+    return (total_sent == len) ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t osc_usb_send_data_frame(const osc_frame_t *frame)
@@ -521,8 +540,8 @@ esp_err_t osc_usb_init(void)
     };
     ESP_ERROR_CHECK(tinyusb_cdcacm_init(&acm_cfg));
 
-    // Tarea de comandos en Core 0, baja prioridad
-    xTaskCreatePinnedToCore(cmd_task, "osc_cmd", 4096, NULL, 5, NULL, 0);
+    // Tarea de comandos en Core 0, prioridad alta para evitar lag de control
+    xTaskCreatePinnedToCore(cmd_task, "osc_cmd", 4096, NULL, 15, NULL, 0);
 
     ESP_LOGI(TAG, "USB CDC listo (GPIO19=D-, GPIO20=D+)");
     return ESP_OK;

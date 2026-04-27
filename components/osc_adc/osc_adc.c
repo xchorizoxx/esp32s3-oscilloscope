@@ -21,6 +21,35 @@ static adc_cali_handle_t        s_cali_handle[2] = {NULL, NULL};
 static volatile uint32_t        s_overflow_count = 0;
 static TaskHandle_t             s_notify_task = NULL;
 
+/* Rango máximo en mV por índice de atenuación (ADC_ATTEN_DB_0/2.5/6/12)
+ * Valores del datasheet ESP32-S3, típicos a 25°C, VDD=3.3V.
+ */
+static const int s_atten_full_scale_mv[4] = {
+    950,    // ADC_ATTEN_DB_0
+    1250,   // ADC_ATTEN_DB_2_5
+    1750,   // ADC_ATTEN_DB_6
+    2500,   // ADC_ATTEN_DB_12 (era 3100, corregido a 2500)
+};
+
+// Caché de atenuación para evitar mutex en el hot path
+static uint8_t s_current_atten[2] = {3, 3};
+
+/* Estado del filtro y decimación — se inicializa/resetea en osc_adc_start() */
+static int16_t  s_prev_ch0[2]  = {0, 0};
+static int16_t  s_prev_ch1[2]  = {0, 0};
+static uint32_t s_skip_count   = 0;
+static int16_t  s_last_ch0     = 0;
+static bool     s_has_ch0      = false;
+
+static void reset_filter_state(void)
+{
+    s_prev_ch0[0] = s_prev_ch0[1] = 0;
+    s_prev_ch1[0] = s_prev_ch1[1] = 0;
+    s_skip_count = 0;
+    s_last_ch0   = 0;
+    s_has_ch0    = false;
+}
+
 /* Ring buffer para muestras procesadas */
 #define SAMPLE_RING_SIZE  2048   // en osc_sample_t
 static osc_sample_t   s_ring[SAMPLE_RING_SIZE];
@@ -174,6 +203,8 @@ esp_err_t osc_adc_init(void)
     }
 
     ESP_LOGI(TAG, "ADC init OK: %d ch @ %lu Hz", n_channels, cfg.sample_rate_hz);
+    s_current_atten[0] = (uint8_t)cfg.ch_atten[0];
+    s_current_atten[1] = (uint8_t)cfg.ch_atten[1];
     return ESP_OK;
 }
 
@@ -181,6 +212,7 @@ esp_err_t osc_adc_init(void)
 esp_err_t osc_adc_start(void)
 {
     if (!s_adc_handle) return ESP_ERR_INVALID_STATE;
+    reset_filter_state();
     s_notify_task = xTaskGetCurrentTaskHandle();
     return adc_continuous_start(s_adc_handle);
 }
@@ -224,17 +256,16 @@ esp_err_t osc_adc_reconfigure(void)
     return ret;
 }
 
-/* --------------------------------------------------------------------------
- * Conversión RAW → mV*10 con calibración
- * -------------------------------------------------------------------------- */
 static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx)
 {
     int voltage_mv = 0;
     if (s_cali_handle[ch_idx]) {
         adc_cali_raw_to_voltage(s_cali_handle[ch_idx], (int)raw, &voltage_mv);
     } else {
-        // Sin calibración: escala lineal aproximada para 12dB atten (0–3100 mV)
-        voltage_mv = (int)((raw * 3100L) / 4095);
+        uint8_t atten_idx = s_current_atten[ch_idx > 1 ? 1 : ch_idx];
+        if (atten_idx > 3) atten_idx = 3;
+        int full_scale = s_atten_full_scale_mv[atten_idx];
+        voltage_mv = (int)((raw * (long)full_scale) / 4095);
     }
     return (int16_t)(voltage_mv * 10);
 }
@@ -275,10 +306,6 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
     size_t result_size = bytes_read / SOC_ADC_DIGI_RESULT_BYTES;
     size_t written = 0;
 
-    // Buffer temporal para median filter
-    static int16_t prev_ch0[2] = {0};  // últimas 2 muestras ch0
-    static int16_t prev_ch1[2] = {0};
-
     // Decimation logic for low sample rates
     uint32_t hw_rate = cfg.sample_rate_hz;
     if (hw_rate < 20000) hw_rate = 20000;
@@ -286,7 +313,6 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
     
     uint32_t skip_factor = hw_rate / cfg.sample_rate_hz;
     if (skip_factor < 1) skip_factor = 1;
-    static uint32_t skip_count = 0;
 
     for (size_t i = 0; i < result_size && written < max_count; i++) {
         adc_digi_output_data_t *p = (adc_digi_output_data_t *)&s_raw_buf[i * SOC_ADC_DIGI_RESULT_BYTES];
@@ -296,14 +322,14 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
 
         if (!dual) {
             // Decimar si es necesario
-            if (++skip_count < skip_factor) continue;
-            skip_count = 0;
+            if (++s_skip_count < skip_factor) continue;
+            s_skip_count = 0;
 
             // Single channel: cada resultado es ch0
             int16_t cur = raw_to_mv10(raw, 0);
-            int16_t filtered = median3_i16(prev_ch0[0], prev_ch0[1], cur);
-            prev_ch0[0] = prev_ch0[1];
-            prev_ch0[1] = cur;
+            int16_t filtered = median3_i16(s_prev_ch0[0], s_prev_ch0[1], cur);
+            s_prev_ch0[0] = s_prev_ch0[1];
+            s_prev_ch0[1] = cur;
 
             buf[written].ch0_mv10      = filtered;
             buf[written].ch1_mv10      = 0;
@@ -311,26 +337,23 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
             written++;
         } else {
             // Dual channel: el ADC alterna CH0 y CH1
-            static int16_t last_ch0 = 0;
-            static bool has_ch0 = false;
-
             if (ch == 0) {
-                last_ch0 = raw_to_mv10(raw, 0);
-                has_ch0  = true;
-            } else if (ch == 1 && has_ch0) {
+                s_last_ch0 = raw_to_mv10(raw, 0);
+                s_has_ch0  = true;
+            } else if (ch == 1 && s_has_ch0) {
                 // Decimar par completo
-                if (++skip_count < skip_factor) {
-                    has_ch0 = false;
+                if (++s_skip_count < skip_factor) {
+                    s_has_ch0 = false;
                     continue;
                 }
-                skip_count = 0;
+                s_skip_count = 0;
 
                 int16_t mv10_ch1 = raw_to_mv10(raw, 1);
-                buf[written].ch0_mv10     = last_ch0;
+                buf[written].ch0_mv10     = s_last_ch0;
                 buf[written].ch1_mv10     = mv10_ch1;
                 buf[written].timestamp_us = timestamp + (uint32_t)(written * 1000000UL / cfg.sample_rate_hz);
                 written++;
-                has_ch0 = false;
+                s_has_ch0 = false;
             }
         }
     }

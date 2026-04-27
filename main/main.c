@@ -61,11 +61,14 @@ static osc_sample_t *s_sample_buf = NULL;
 
 /* Queue entre ADC_CAPTURE y DSP_PROCESS */
 typedef struct {
-    size_t count;
-    uint32_t timestamp_us;
-    osc_sample_t samples[SAMPLE_BUF_SIZE]; // Pasar datos por valor evita race conditions
-} adc_batch_t;
+    size_t    count;
+    uint32_t  timestamp_us;
+    // No hay samples aquí — el DSP lee desde s_sample_buf protegido por mutex
+} adc_msg_t;
 static QueueHandle_t s_adc_queue = NULL;
+
+/* Buffer compartido + mutex */
+static SemaphoreHandle_t s_sample_mutex = NULL;
 
 /* --------------------------------------------------------------------------
  * Señal de test (PWM 1 kHz en GPIO3, para auto-test sin señal externa)
@@ -151,15 +154,21 @@ static void adc_capture_task(void *arg)
 
         // Enviar batch al DSP
         size_t copy_count = count < SAMPLE_BUF_SIZE ? count : SAMPLE_BUF_SIZE;
-        adc_batch_t batch = {
-            .count        = copy_count,
-            .timestamp_us = s_sample_buf[0].timestamp_us,
-        };
-        memcpy(batch.samples, s_sample_buf, copy_count * sizeof(osc_sample_t));
         
-        // No bloquear si el queue está lleno (la DSP task está ocupada)
-        if (xQueueSend(s_adc_queue, &batch, 0) != pdTRUE) {
-            // ESP_LOGD(TAG, "DSP queue full, dropping batch");
+        // Proteger el buffer compartido antes de que el DSP lo lea
+        if (xSemaphoreTake(s_sample_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            // s_sample_buf ya tiene los datos (osc_adc_read_samples escribe ahí directamente)
+            adc_msg_t msg = {
+                .count        = copy_count,
+                .timestamp_us = s_sample_buf[0].timestamp_us,
+            };
+            
+            // Si el queue está lleno, liberar el mutex inmediatamente
+            if (xQueueSend(s_adc_queue, &msg, 0) != pdTRUE) {
+                xSemaphoreGive(s_sample_mutex);
+                // ESP_LOGD(TAG, "DSP queue full, dropping batch");
+            }
+            // NOTA: El mutex lo liberará el dsp_process_task después de copiar los datos
         }
     }
 }
@@ -194,10 +203,9 @@ static void dsp_process_task(void *arg)
         .fft_magnitudes_ch0 = s_fft_buf,
     };
 
-    adc_batch_t batch;
-
+    adc_msg_t msg;
     while (1) {
-        if (xQueueReceive(s_adc_queue, &batch, pdMS_TO_TICKS(10)) != pdTRUE) {
+        if (xQueueReceive(s_adc_queue, &msg, pdMS_TO_TICKS(10)) != pdTRUE) {
             continue;
         }
 
@@ -205,16 +213,18 @@ static void dsp_process_task(void *arg)
         osc_config_get(&cfg);
 
         if (!cfg.streaming) {
+            xSemaphoreGive(s_sample_mutex); // Liberar para que ADC pueda seguir aunque no estemos en streaming
             frame_fill = 0;
             continue;
         }
 
-        // Copiar batch al acumulador local
-        size_t to_copy = batch.count;
+        // Copiar batch del buffer compartido al acumulador local y liberar mutex
+        size_t to_copy = msg.count;
         if (frame_fill + to_copy > cfg.frame_size) {
             to_copy = cfg.frame_size - frame_fill;
         }
-        memcpy(&frame_accum[frame_fill], batch.samples, to_copy * sizeof(osc_sample_t));
+        memcpy(&frame_accum[frame_fill], s_sample_buf, to_copy * sizeof(osc_sample_t));
+        xSemaphoreGive(s_sample_mutex);  // ← LIBERAR para que ADC pueda escribir otra vez
 
         frame_fill += to_copy;
 
@@ -251,17 +261,21 @@ static void dsp_process_task(void *arg)
         esp_err_t dsp_ret = osc_dsp_process_frame(frame_accum, frame_fill,
                                                     &out_frame, &trig_result);
 
-        if (dsp_ret == ESP_OK && osc_usb_is_connected()) {
-            led_set(true);
-            osc_usb_send_data_frame(&out_frame);
+        if (dsp_ret == ESP_OK) {
+            // Re-verificar streaming justo antes de enviar para evitar frames "huérfanos" tras STOP
+            osc_config_get(&cfg);
+            if (cfg.streaming && osc_usb_is_connected()) {
+                led_set(true);
+                osc_usb_send_data_frame(&out_frame);
 
-            // Enviar mediciones cada 10 frames para no saturar USB
-            static uint8_t meas_counter = 0;
-            if (++meas_counter >= 10) {
-                osc_usb_send_measurements(&out_frame);
-                meas_counter = 0;
+                // Enviar mediciones cada 10 frames para no saturar USB
+                static uint8_t meas_counter = 0;
+                if (++meas_counter >= 10) {
+                    osc_usb_send_measurements(&out_frame);
+                    meas_counter = 0;
+                }
+                led_set(false);
             }
-            led_set(false);
         }
 
         // Resetear acumulador para el próximo frame
@@ -307,9 +321,12 @@ void app_main(void)
     }
 
     // --- Sincronización entre tareas ---
-    s_adc_queue = xQueueCreate(8, sizeof(adc_batch_t));
-    if (!s_adc_queue) {
-        ESP_LOGE(TAG, "FATAL: no se pudo crear queue");
+    s_adc_queue    = xQueueCreate(4, sizeof(adc_msg_t));
+    s_sample_mutex = xSemaphoreCreateBinary();
+    xSemaphoreGive(s_sample_mutex); // Inicialmente disponible
+    
+    if (!s_adc_queue || !s_sample_mutex) {
+        ESP_LOGE(TAG, "FATAL: no se pudo crear sincronización");
         abort();
     }
 
@@ -325,7 +342,7 @@ void app_main(void)
     // ADC_CAPTURE en Core 1 — máxima prioridad, pinned
     xTaskCreatePinnedToCore(
         adc_capture_task, "adc_cap",
-        4096, NULL,
+        6144, NULL,  // Subido a 6144 por seguridad
         24, NULL, 1  // Core 1
     );
 

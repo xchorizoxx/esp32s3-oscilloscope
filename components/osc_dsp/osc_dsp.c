@@ -8,36 +8,14 @@
 
 static const char *TAG = "osc_dsp";
 
-// Tablas de ventanas pre-calculadas (para FFT_MAX_POINTS/2 puntos máximo)
-static float s_win_hanning[OSC_FFT_MAX_POINTS];
-static float s_win_hamming[OSC_FFT_MAX_POINTS];
-static float s_win_blackman[OSC_FFT_MAX_POINTS];
-static bool  s_windows_ready = false;
-
 // Buffer de trabajo para FFT (complex: re/im intercalados, float32)
 static float s_fft_work[OSC_FFT_MAX_POINTS * 2];
 
 /* -------------------------------------------------------------------------- */
-static void precompute_windows(void)
-{
-    for (int i = 0; i < OSC_FFT_MAX_POINTS; i++) {
-        float t = (float)i / (OSC_FFT_MAX_POINTS - 1);
-        s_win_hanning[i]  = 0.5f * (1.0f - cosf(2.0f * M_PI * t));
-        s_win_hamming[i]  = 0.54f - 0.46f * cosf(2.0f * M_PI * t);
-        s_win_blackman[i] = 0.42f - 0.5f * cosf(2.0f * M_PI * t)
-                                  + 0.08f * cosf(4.0f * M_PI * t);
-    }
-}
-
-/* -------------------------------------------------------------------------- */
 esp_err_t osc_dsp_init(void)
 {
-    if (!s_windows_ready) {
-        precompute_windows();
-        s_windows_ready = true;
-        ESP_LOGI(TAG, "Tablas de ventanas pre-calculadas (%d puntos)", OSC_FFT_MAX_POINTS);
-    }
     dsps_fft2r_init_fc32(NULL, OSC_FFT_MAX_POINTS);
+    ESP_LOGI(TAG, "FFT inicializado (%d puntos)", OSC_FFT_MAX_POINTS);
     return ESP_OK;
 }
 
@@ -141,25 +119,34 @@ esp_err_t osc_dsp_compute_fft(const int16_t *samples_mv10, size_t n,
     if (!samples_mv10 || !magnitudes || !bin_hz) return ESP_ERR_INVALID_ARG;
     if (n < 64 || n > OSC_FFT_MAX_POINTS || (n & (n-1)) != 0) return ESP_ERR_INVALID_ARG;
 
-    // Seleccionar tabla de ventana
-    const float *win = NULL;
-    switch (window) {
-        case OSC_FFT_WIN_HANNING:  win = s_win_hanning;  break;
-        case OSC_FFT_WIN_HAMMING:  win = s_win_hamming;  break;
-        case OSC_FFT_WIN_BLACKMAN: win = s_win_blackman; break;
-        default: win = NULL; break;  // rectangular
-    }
-
-    // Llenar buffer complejo: re[i] = sample, im[i] = 0
     // Calcular DC para removerlo antes de la FFT
     float dc = 0;
     for (size_t i = 0; i < n; i++) dc += samples_mv10[i];
     dc /= n;
 
-    float scale = 1.0f / 10000.0f;  // mV*10 → voltios (para que la FFT trabaje en V)
+    float scale = 1.0f / 10000.0f;  // mV*10 → voltios
     for (size_t i = 0; i < n; i++) {
         float sample = ((float)samples_mv10[i] - dc) * scale;
-        float w = win ? win[i * OSC_FFT_MAX_POINTS / n] : 1.0f;
+        float w = 1.0f;
+        
+        if (window != OSC_FFT_WIN_RECTANGULAR) {
+            float t = (n > 1) ? (float)i / (float)(n - 1) : 0.0f;
+            switch (window) {
+                case OSC_FFT_WIN_HANNING:
+                    w = 0.5f * (1.0f - cosf(2.0f * M_PI * t));
+                    break;
+                case OSC_FFT_WIN_HAMMING:
+                    w = 0.54f - 0.46f * cosf(2.0f * M_PI * t);
+                    break;
+                case OSC_FFT_WIN_BLACKMAN:
+                    w = 0.42f - 0.5f * cosf(2.0f * M_PI * t) + 0.08f * cosf(4.0f * M_PI * t);
+                    break;
+                default:
+                    w = 1.0f;
+                    break;
+            }
+        }
+
         s_fft_work[2*i]     = sample * w;  // parte real
         s_fft_work[2*i + 1] = 0.0f;        // parte imaginaria
     }

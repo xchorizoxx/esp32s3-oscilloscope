@@ -158,11 +158,14 @@ class MainWindow(QMainWindow):
         cp.ch2_panel.cal_gnd_requested.connect(lambda: self._on_cal_gnd(1))
 
         # Trigger
-        cp.trig_panel.trigger_params_changed.connect(self.controller.set_trigger)
-        cp.trig_panel.pre_trigger_changed.connect(self.controller.set_pre_trigger)
-        cp.trig_panel.trigger_params_changed.connect(
-            lambda ch, mv, edge: self.waveform_widget.set_trigger_level(mv, ch)
+        cp.trig_panel.trigger_hw_changed.connect(self.controller.set_trigger)
+        cp.trig_panel.trigger_ui_preview.connect(
+            lambda mv, ch: self.waveform_widget.set_trigger_level(mv, ch)
         )
+        cp.trig_panel.pre_trigger_changed.connect(self.controller.set_pre_trigger)
+
+        # Autoscale synchronization
+        self.waveform_widget.autoscale_finished.connect(self._on_autoscale_finished)
 
         # 2. Reader -> UI Updates
         self.reader.connection_changed.connect(self._on_connection_changed)
@@ -306,6 +309,12 @@ class MainWindow(QMainWindow):
         rate = self.controller.current_config.sample_rate
         count = latest.get('sample_count', 0)
         self.waveform_widget.auto_scale(ch1, ch2, rate, count)
+
+    def _on_autoscale_finished(self, scale_mv: float, timebase_us: float):
+        """Sincroniza los controles de la UI tras un Autoscale."""
+        self.controls_panel.set_timebase_value(timebase_us)
+        self.controls_panel.set_voltage_scale_value(scale_mv, 0)
+        self.controls_panel.set_voltage_scale_value(scale_mv, 1)
 
     def _on_theme_toggle(self, theme: str):
         self._current_theme = theme

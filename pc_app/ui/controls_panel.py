@@ -432,3 +432,23 @@ class ControlsPanel(QDockWidget):
         self.btn_gen_start.setEnabled(True)
         self.btn_gen_stop.setEnabled(False)
         self.gen_stop_requested.emit()
+
+    def set_timebase_value(self, us_per_div: float):
+        """Actualiza el combo de T/div desde código."""
+        self.cb_timebase.blockSignals(True)
+        # Buscar el valor más cercano en el combo
+        for i in range(self.cb_timebase.count()):
+            if abs(self.cb_timebase.itemData(i) - us_per_div) < 0.1:
+                self.cb_timebase.setCurrentIndex(i)
+                break
+        self.cb_timebase.blockSignals(False)
+
+    def set_voltage_scale_value(self, mv_per_div: float, channel: int):
+        """Actualiza el combo de V/div desde código."""
+        panel = self.ch1_panel if channel == 0 else self.ch2_panel
+        panel.cb_scale.blockSignals(True)
+        for i in range(panel.cb_scale.count()):
+            if abs(panel.cb_scale.itemData(i) - mv_per_div) < 0.1:
+                panel.cb_scale.setCurrentIndex(i)
+                break
+        panel.cb_scale.blockSignals(False)

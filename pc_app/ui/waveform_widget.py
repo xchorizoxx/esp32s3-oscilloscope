@@ -17,6 +17,8 @@ from PyQt6.QtGui import QFont
 class WaveformWidget(QWidget):
 
     cursor_moved = pyqtSignal(float, float)  # x_us, y_mv
+    # scale_mv, timebase_us
+    autoscale_finished = pyqtSignal(float, float)
 
     # Colors — CH1 = indice 0, CH2 = indice 1
     CH1_COLOR = '#22d3ee'   # Cyan for CH1
@@ -623,5 +625,6 @@ class WaveformWidget(QWidget):
                     best_tb = tb
                     break
             self.timebase_us = best_tb
+            self.autoscale_finished.emit(float(best_scale), float(best_tb))
 
         self._update_ranges()
