@@ -51,6 +51,7 @@ class ControlsPanel(QDockWidget):
 
     # NEW: UI Hold (freeze display without stopping hardware)
     ui_hold_changed = pyqtSignal(bool)
+    oversampling_changed = pyqtSignal(int)
     reload_requested = pyqtSignal()   # Reload App
 
     def __init__(self, title="Controls", parent=None):
@@ -101,12 +102,26 @@ class ControlsPanel(QDockWidget):
         )
         row_mode.addWidget(lbl_mode)
         self.cb_mode = QComboBox()
-        self.cb_mode.addItem("Dual CH", 1)
-        self.cb_mode.addItem("Single CH", 0)
-        self.cb_mode.addItem("Oversample", 2)
+        self.cb_mode.addItem("Dual Channel", 2)
+        self.cb_mode.addItem("Channel 1 (Blue)", 0)
+        self.cb_mode.addItem("Channel 2 (Yellow)", 1)
         self.cb_mode.setToolTip("Modo de adquisicion del ADC")
         row_mode.addWidget(self.cb_mode)
         l_acq.addLayout(row_mode)
+
+        # Oversampling (Global)
+        row_os = QHBoxLayout()
+        lbl_os = QLabel("Oversampling:")
+        lbl_os.setToolTip("Promedio de muestras por punto para reducir ruido. Reduce el sample rate efectivo.")
+        row_os.addWidget(lbl_os)
+        self.cb_oversampling = QComboBox()
+        self.cb_oversampling.addItem("None (x1)", 1)
+        self.cb_oversampling.addItem("x2", 2)
+        self.cb_oversampling.addItem("x4", 4)
+        self.cb_oversampling.addItem("x8", 8)
+        self.cb_oversampling.addItem("x16", 16)
+        row_os.addWidget(self.cb_oversampling)
+        l_acq.addLayout(row_os)
 
         # Rate: capped at 150 kHz (real hardware limit with ADC clock hack)
         # BUG-05 FIX: 160 kHz removed (exceeds firmware max of 150 kHz)
@@ -361,6 +376,7 @@ class ControlsPanel(QDockWidget):
         self.btn_autoscale.clicked.connect(self.auto_scale_requested.emit)
 
         self.cb_mode.currentIndexChanged.connect(lambda i: self.mode_changed.emit(self.cb_mode.itemData(i)))
+        self.cb_oversampling.currentIndexChanged.connect(lambda i: self.oversampling_changed.emit(self.cb_oversampling.itemData(i)))
         self.cb_rate.currentIndexChanged.connect(lambda i: self.rate_changed.emit(self.cb_rate.itemData(i)))
         self.cb_frame.currentIndexChanged.connect(lambda i: self.frame_size_changed.emit(self.cb_frame.itemData(i)))
         self.cb_timebase.currentIndexChanged.connect(lambda i: self.timebase_changed.emit(self.cb_timebase.itemData(i)))

@@ -65,7 +65,8 @@ esp_err_t osc_config_set(const osc_config_t *cfg)
     if (cfg->trigger_channel > 1) return ESP_ERR_INVALID_ARG;
     if (cfg->ch_atten[0] > OSC_ATTEN_12DB || cfg->ch_atten[1] > OSC_ATTEN_12DB)
         return ESP_ERR_INVALID_ARG;
-    if (cfg->oversample_factor != 4 && cfg->oversample_factor != 8 &&
+    if (cfg->oversample_factor != 1 && cfg->oversample_factor != 2 &&
+        cfg->oversample_factor != 4 && cfg->oversample_factor != 8 &&
         cfg->oversample_factor != 16)
         return ESP_ERR_INVALID_ARG;
 
@@ -80,7 +81,7 @@ esp_err_t osc_config_set(const osc_config_t *cfg)
 /* -------------------------------------------------------------------------- */
 esp_err_t osc_config_set_mode(osc_mode_t mode)
 {
-    if (mode > OSC_MODE_OVERSAMPLE) return ESP_ERR_INVALID_ARG;
+    if (mode > OSC_MODE_DUAL_CH) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_config.mode = mode;
     xSemaphoreGive(s_mutex);
@@ -147,6 +148,16 @@ esp_err_t osc_config_set_pre_trigger(uint32_t samples)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (samples > s_config.frame_size / 2) samples = s_config.frame_size / 2;
     s_config.pre_trigger_samples = samples;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+esp_err_t osc_config_set_oversample(uint8_t factor)
+{
+    if (factor != 1 && factor != 2 && factor != 4 && factor != 8 && factor != 16)
+        return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.oversample_factor = factor;
     xSemaphoreGive(s_mutex);
     return ESP_OK;
 }

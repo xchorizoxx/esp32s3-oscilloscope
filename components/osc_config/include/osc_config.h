@@ -12,9 +12,9 @@ extern "C" {
  * ========================================================================= */
 
 typedef enum {
-    OSC_MODE_SINGLE_CH  = 0,  ///< 1 canal, máxima velocidad
-    OSC_MODE_DUAL_CH    = 1,  ///< 2 canales interleaved, velocidad/2
-    OSC_MODE_OVERSAMPLE = 2,  ///< 1 canal con oversampling x16, mayor resolución
+    OSC_MODE_SINGLE_CH1 = 0,  ///< 1 canal (CH1), máxima velocidad
+    OSC_MODE_SINGLE_CH2 = 1,  ///< 1 canal (CH2), máxima velocidad
+    OSC_MODE_DUAL_CH    = 2,  ///< 2 canales interleaved, velocidad/2
 } osc_mode_t;
 
 typedef enum {
@@ -50,13 +50,13 @@ typedef struct {
 
 /** Configuración por defecto */
 #define OSC_CONFIG_DEFAULT() {                       \
-    .mode                     = OSC_MODE_SINGLE_CH,  \
+    .mode                     = OSC_MODE_SINGLE_CH1, \
     .sample_rate_hz           = 83333,               \
     .trigger_level_mv         = 1000.0f,             \
     .trigger_edge             = OSC_TRIG_EDGE_RISING,\
     .trigger_channel          = 0,                   \
     .ch_atten                 = {OSC_ATTEN_12DB,     \
-                                  OSC_ATTEN_12DB},   \
+                                   OSC_ATTEN_12DB},   \
     .fft_enabled              = false,               \
     .streaming                = false,               \
     .pre_trigger_samples      = 128,                 \
@@ -64,7 +64,7 @@ typedef struct {
     .auto_trigger             = true,                \
     .auto_trigger_timeout_ms  = 200,                 \
     .measurements_enabled     = true,                \
-    .oversample_factor        = 16,                  \
+    .oversample_factor        = 1,                   \
 }
 
 /* =========================================================================
@@ -95,6 +95,7 @@ esp_err_t osc_config_set_streaming(bool en);
 esp_err_t osc_config_set_fft(bool en);
 esp_err_t osc_config_set_frame_size(uint32_t n);
 esp_err_t osc_config_set_pre_trigger(uint32_t samples);
+esp_err_t osc_config_set_oversample(uint8_t factor);
 
 /** @brief Persistir configuración en NVS flash. */
 esp_err_t osc_config_save_nvs(void);

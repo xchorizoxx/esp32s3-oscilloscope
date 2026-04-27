@@ -247,6 +247,20 @@ static void process_command(const char *cmd)
         return;
     }
 
+    // CMD_SET_OVERSAMPLE <factor>
+    if (strncmp(cmd, OSC_CMD_SET_OVERSAMPLE, strlen(OSC_CMD_SET_OVERSAMPLE)) == 0) {
+        int factor = 1;
+        if (sscanf(cmd + strlen(OSC_CMD_SET_OVERSAMPLE), " %d", &factor) == 1) {
+            if (osc_config_set_oversample((uint8_t)factor) == ESP_OK)
+                osc_usb_send_ack(cmd);
+            else
+                osc_usb_send_nak(cmd, "factor invalido: 1, 2, 4, 8, 16");
+        } else {
+            osc_usb_send_nak(cmd, "argumento requerido");
+        }
+        return;
+    }
+
     osc_usb_send_nak(cmd, "comando desconocido");
 }
 

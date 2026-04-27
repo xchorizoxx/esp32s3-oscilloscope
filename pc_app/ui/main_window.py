@@ -114,6 +114,7 @@ class MainWindow(QMainWindow):
 
         cp.mode_changed.connect(self.controller.set_mode)
         cp.rate_changed.connect(self.controller.set_sample_rate)
+        cp.oversampling_changed.connect(self.controller.set_oversampling)
         cp.frame_size_changed.connect(self.controller.set_frame_size)
 
         cp.auto_scale_requested.connect(self._on_auto_scale)
@@ -353,7 +354,8 @@ class MainWindow(QMainWindow):
             # BUG-03 FIX: update_stats expects (fps, bytes_sec, overflow_count)
             #             pass _overflow_count as overflow counter, not frames_crc_err
             self.status_bar.update_stats(stats['fps'], stats['bytes_per_sec'], self._overflow_count)
-            self.status_bar.update_rate(self.controller.current_config.sample_rate)
+            cfg = self.controller.current_config
+            self.status_bar.update_rate(cfg.sample_rate // cfg.oversampling)
 
         # NUEVO: Si ui_hold esta activo, NO renderizar datos nuevos
         if self._ui_hold:
@@ -367,7 +369,8 @@ class MainWindow(QMainWindow):
         latest = frames[-1]
         ch1_raw = latest.get('ch0_mv')
         ch2_raw = latest.get('ch1_mv')
-        rate = self.controller.current_config.sample_rate
+        cfg = self.controller.current_config
+        rate = cfg.sample_rate / cfg.oversampling
         sample_count = latest.get('sample_count', 0)
         trigger_idx = latest.get('trigger_index', 0)
 

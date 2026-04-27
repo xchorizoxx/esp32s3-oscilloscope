@@ -38,8 +38,9 @@ VALID_FRAME_SIZES = [64, 128, 256, 512, 1024, 2048, 4096]
 # Attenuation indices validos (0=0dB, 1=2.5dB, 2=6dB, 3=12dB)
 VALID_ATTEN_INDICES = [0, 1, 2, 3]
 
-# Modos validos
-VALID_MODES = [0, 1, 2]  # 0=single, 1=dual, 2=oversample
+# Modos validos (0=Single CH1, 1=Single CH2, 2=Dual)
+VALID_MODES = [0, 1, 2]
+VALID_OVERSAMPLING_FACTORS = [1, 2, 4, 8, 16]
 
 # Mapeo de trigger edge: UI -> Firmware
 # UI: 0=None, 1=Rising, 2=Falling, 3=Any
@@ -64,6 +65,7 @@ class OscConfig:
     ch0_coupling: str = "AC+DC"      # Modos locales: AC+DC, AC, DC, GND
     ch1_coupling: str = "AC+DC"
     streaming: bool = False
+    oversampling: int = 1
 
 class _ConfigPushWorker(QObject):
     """Worker que corre en hilo separado para evitar bloquear la UI."""
@@ -192,6 +194,7 @@ class DeviceController(QObject):
         self._send_command(f"CMD_SET_MODE {cfg.mode}",        wait_ack=True)
         self._send_command(f"CMD_SET_RATE {cfg.sample_rate}", wait_ack=True)
         self._send_command(f"CMD_SET_FRAME {cfg.frame_size}", wait_ack=True)
+        self._send_command(f"CMD_SET_OVERSAMPLE {cfg.oversampling}", wait_ack=True)
 
         edge_fw = _EDGE_UI_TO_FW.get(cfg.trig_edge, 3)
         self._send_command(
@@ -298,12 +301,23 @@ class DeviceController(QObject):
         return ok
 
     def set_mode(self, mode: int) -> bool:
-        """Cambia el modo de adquisicion. Para el stream antes de reconfigurar el ADC."""
+        """Establece modo: 0=Single CH1, 1=Single CH2, 2=Dual."""
         if mode not in VALID_MODES:
-            raise ValueError(f"Modo invalido: {mode}. Validos: {VALID_MODES}")
+            return False
         prev = self.current_config.mode
         self.current_config.mode = mode
         if prev != mode:
+            self._safe_reconfig()
+        self.config_changed.emit()
+        return True
+
+    def set_oversampling(self, factor: int) -> bool:
+        """Establece factor de oversampling promediado (1, 2, 4, 8, 16)."""
+        if factor not in VALID_OVERSAMPLING_FACTORS:
+            return False
+        prev = self.current_config.oversampling
+        self.current_config.oversampling = factor
+        if prev != factor:
             self._safe_reconfig()
         self.config_changed.emit()
         return True

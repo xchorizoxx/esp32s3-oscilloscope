@@ -57,7 +57,6 @@ static void reset_filter_state(void)
 
 /* Ring buffer para muestras procesadas */
 #define SAMPLE_RING_SIZE  2048   // en osc_sample_t
-static osc_sample_t   s_ring[SAMPLE_RING_SIZE];
 static volatile int   s_ring_head = 0;  // escritura
 static volatile int   s_ring_tail = 0;  // lectura
 static SemaphoreHandle_t s_ring_mutex = NULL;
@@ -157,26 +156,35 @@ esp_err_t osc_adc_init(void)
     ESP_ERROR_CHECK(adc_continuous_new_handle(&handle_cfg, &s_adc_handle));
 
     // --- Patrón de canales ---
-    uint8_t n_channels = (cfg.mode == OSC_MODE_SINGLE_CH || cfg.mode == OSC_MODE_OVERSAMPLE) ? 1 : 2;
-    adc_digi_pattern_config_t pattern[2];
-
     // Mapeo de osc_atten_t → adc_atten_t (valores idénticos en ESP-IDF)
     adc_atten_t atten0 = (adc_atten_t)cfg.ch_atten[0];
     adc_atten_t atten1 = (adc_atten_t)cfg.ch_atten[1];
 
-    pattern[0] = (adc_digi_pattern_config_t){
-        .atten    = atten0,
-        .channel  = ADC_CHANNEL_0,  // GPIO1
-        .unit     = ADC_UNIT_1,
-        .bit_width = OSC_ADC_BITWIDTH,
-    };
-    if (n_channels == 2) {
-        pattern[1] = (adc_digi_pattern_config_t){
-            .atten    = atten1,
+    uint8_t n_channels = (cfg.mode == OSC_MODE_DUAL_CH) ? 2 : 1;
+    adc_digi_pattern_config_t pattern[2];
+
+    if (cfg.mode == OSC_MODE_SINGLE_CH2) {
+        pattern[0] = (adc_digi_pattern_config_t){
+            .atten    = (adc_atten_t)cfg.ch_atten[1],
             .channel  = ADC_CHANNEL_1,  // GPIO2
             .unit     = ADC_UNIT_1,
             .bit_width = OSC_ADC_BITWIDTH,
         };
+    } else {
+        pattern[0] = (adc_digi_pattern_config_t){
+            .atten    = (adc_atten_t)cfg.ch_atten[0],
+            .channel  = ADC_CHANNEL_0,  // GPIO1
+            .unit     = ADC_UNIT_1,
+            .bit_width = OSC_ADC_BITWIDTH,
+        };
+        if (n_channels == 2) {
+            pattern[1] = (adc_digi_pattern_config_t){
+                .atten    = (adc_atten_t)cfg.ch_atten[1],
+                .channel  = ADC_CHANNEL_1,  // GPIO2
+                .unit     = ADC_UNIT_1,
+                .bit_width = OSC_ADC_BITWIDTH,
+            };
+        }
     }
 
     // El ESP32-S3 solo soporta entre 20kHz y 83.3kHz en modo continuo.
@@ -282,16 +290,6 @@ static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx)
     return (int16_t)(voltage_mv * 10);
 }
 
-/* --------------------------------------------------------------------------
- * Filtro de mediana de 3 puntos (elimina spikes de silicio)
- * -------------------------------------------------------------------------- */
-static inline int16_t median3_i16(int16_t a, int16_t b, int16_t c)
-{
-    if (a > b) { int16_t t = a; a = b; b = t; }
-    if (b > c) { int16_t t = b; b = c; c = t; }
-    if (a > b) { int16_t t = a; a = b; b = t; }
-    return b;
-}
 
 /* -------------------------------------------------------------------------- */
 esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
@@ -302,7 +300,6 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
 
     osc_config_t cfg;
     osc_config_get(&cfg);
-    bool dual = (cfg.mode == OSC_MODE_DUAL_CH);
 
     // Esperar notificación de la ISR
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeout_ms)) == 0) {
@@ -318,13 +315,8 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
     size_t result_size = bytes_read / SOC_ADC_DIGI_RESULT_BYTES;
     size_t written = 0;
 
-    // Decimation logic for low sample rates
-    uint32_t hw_rate = cfg.sample_rate_hz;
-    if (hw_rate < 20000) hw_rate = 20000;
-    if (hw_rate > 83333) hw_rate = 83333;
-    
-    uint32_t skip_factor = hw_rate / cfg.sample_rate_hz;
-    if (skip_factor < 1) skip_factor = 1;
+    uint32_t oversample = cfg.oversample_factor;
+    if (oversample < 1) oversample = 1;
 
     for (size_t i = 0; i < result_size && written < max_count; i++) {
         adc_digi_output_data_t *p = (adc_digi_output_data_t *)&s_raw_buf[i * SOC_ADC_DIGI_RESULT_BYTES];
@@ -332,19 +324,19 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
         uint8_t  ch  = p->type2.channel;
         uint16_t raw = p->type2.data;
 
-        if (!dual) {
+        if (cfg.mode != OSC_MODE_DUAL_CH) {
             s_acc_ch0 += raw;
-            if (++s_acc_count < skip_factor) continue;
+            if (++s_acc_count < oversample) continue;
 
-            uint16_t avg_raw = (uint16_t)(s_acc_ch0 / s_acc_count);
+            uint16_t avg_raw = (uint16_t)(s_acc_ch0 / oversample);
             s_acc_ch0 = 0;
             s_acc_count = 0;
 
-            int16_t filtered = raw_to_mv10(avg_raw, 0);
+            int16_t filtered = raw_to_mv10(avg_raw, (cfg.mode == OSC_MODE_SINGLE_CH2 ? 1 : 0));
 
             buf[written].ch0_mv10      = filtered;
             buf[written].ch1_mv10      = 0;
-            buf[written].timestamp_us  = timestamp + (uint32_t)(written * 1000000UL / cfg.sample_rate_hz);
+            buf[written].timestamp_us  = timestamp + (uint32_t)(written * 1000000ULL * oversample / cfg.sample_rate_hz);
             written++;
         } else {
             // Dual channel: el ADC alterna CH0 y CH1
@@ -352,17 +344,16 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
                 s_acc_ch0 += raw;
             } else if (ch == 1) {
                 s_acc_ch1 += raw;
-                s_has_ch0 = true; // Marcamos que tenemos al menos un par en proceso
+                s_has_ch0 = true; 
             }
 
-            // Cuando completamos el ciclo de acumulación para ambos canales
-            if (s_has_ch0 && ++s_acc_count >= skip_factor) {
-                uint16_t avg0 = (uint16_t)(s_acc_ch0 / skip_factor);
-                uint16_t avg1 = (uint16_t)(s_acc_ch1 / skip_factor);
+            if (s_has_ch0 && ++s_acc_count >= oversample) {
+                uint16_t avg0 = (uint16_t)(s_acc_ch0 / oversample);
+                uint16_t avg1 = (uint16_t)(s_acc_ch1 / oversample);
                 
                 buf[written].ch0_mv10 = raw_to_mv10(avg0, 0);
                 buf[written].ch1_mv10 = raw_to_mv10(avg1, 1);
-                buf[written].timestamp_us = timestamp + (uint32_t)(written * 1000000UL / (cfg.sample_rate_hz));
+                buf[written].timestamp_us = timestamp + (uint32_t)(written * 1000000ULL * oversample / cfg.sample_rate_hz);
                 
                 written++;
                 s_acc_ch0 = 0;
