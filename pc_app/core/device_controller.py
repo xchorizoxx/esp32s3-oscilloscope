@@ -65,6 +65,21 @@ class OscConfig:
     ch1_coupling: str = "AC+DC"
     streaming: bool = False
 
+class _ConfigPushWorker(QObject):
+    """Worker que corre en hilo separado para evitar bloquear la UI."""
+    finished = pyqtSignal()
+
+    def __init__(self, controller: 'DeviceController', mode: str = "config") -> None:
+        super().__init__()
+        self._ctrl = controller
+        self._mode = mode
+
+    def run(self) -> None:
+        if self._mode == "config":
+            self._ctrl._push_config_blocking()
+        elif self._mode == "atten":
+            self._ctrl._push_atten_blocking()
+        self.finished.emit()
 
 class DeviceController(QObject):
     """
@@ -146,24 +161,9 @@ class DeviceController(QObject):
             self.firmware_version = "Unknown"
             self.port_name = ""
 
-class _ConfigPushWorker(QObject):
-    """Worker que corre en hilo separado para evitar bloquear la UI."""
-    finished = pyqtSignal()
 
-    def __init__(self, controller: 'DeviceController', mode: str = "config") -> None:
-        super().__init__()
-        self._ctrl = controller
-        self._mode = mode
 
-    def run(self) -> None:
-        if self._mode == "config":
-            self._ctrl._push_config_blocking()
-        elif self._mode == "atten":
-            self._ctrl._push_atten_blocking()
-        self.finished.emit()
-
-class DeviceController(QObject):
-    # ... (rest of class until _sync_state_on_connect)
+    # --- Continúa métodos de DeviceController ---
 
     def _sync_state_on_connect(self) -> None:
         """Lee capabilities del firmware y sincroniza la UI."""
