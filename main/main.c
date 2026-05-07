@@ -310,13 +310,31 @@ void app_main(void)
     ESP_ERROR_CHECK(osc_config_init());
     ESP_ERROR_CHECK(osc_adc_init());
     ESP_ERROR_CHECK(osc_dsp_init());
+
+    ESP_LOGW(TAG, "==========================================================");
+    ESP_LOGW(TAG, " WARNING: USB port will switch to TinyUSB in 2 seconds...");
+    ESP_LOGW(TAG, " Serial monitor will stop receiving logs after this point.");
+    ESP_LOGW(TAG, " THIS IS NORMAL BEHAVIOR, NOT A CRASH.");
+    ESP_LOGW(TAG, " Close this monitor and open the PC App.");
+    ESP_LOGW(TAG, "==========================================================");
+    
+    // Quick blink to indicate the system is alive
+    for (int i = 0; i < 10; i++) {
+        led_set(i % 2 == 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    led_set(false);
+
+    // Wait for the USB_SERIAL_JTAG log buffer to flush
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
     ESP_ERROR_CHECK(osc_usb_init());
 
-    // --- Allocar buffers en RAM Interna (Requerido para DMA en ESP32-S3) ---
+    // --- Allocate buffers in Internal RAM (Required for DMA on ESP32-S3) ---
     s_sample_buf = (osc_sample_t *)heap_caps_malloc(
         SAMPLE_BUF_SIZE * sizeof(osc_sample_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!s_sample_buf) {
-        ESP_LOGE(TAG, "FATAL: No hay memoria interna para DMA");
+        ESP_LOGE(TAG, "FATAL: Not enough internal memory for DMA");
         abort();
     }
 
