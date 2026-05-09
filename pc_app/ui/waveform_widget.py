@@ -40,11 +40,22 @@ class WaveformWidget(QWidget):
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground(self.BG_COLOR)
-        self.plot_widget.showGrid(x=False, y=False)
-
+        
         self.plot_item = self.plot_widget.getPlotItem()
+        # Configuración de Lienzo Moderno (Táctil/Fluido)
         self.plot_item.setMouseEnabled(x=True, y=True)
         self.plot_item.hideButtons()
+        
+        # Ocultar los números de los ejes para un look limpio, pero mantener los ejes físicos
+        self.plot_item.getAxis('bottom').setStyle(showValues=False)
+        self.plot_item.getAxis('left').setStyle(showValues=False)
+        
+        # Encender el grid nativo acelerado por hardware
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+
+        # Deshabilitar AutoRange en X para estabilidad total (el usuario controla el zoom)
+        self.plot_item.enableAutoRange(axis='x', enable=False)
+        self.plot_item.getViewBox().setMouseEnabled(x=True, y=True)
 
         # Axis labels (disabled auto SI prefixes to prevent kV and ks since data is in mV and µs)
         self.plot_item.setLabel('bottom', 'Time (µs)')
@@ -131,36 +142,8 @@ class WaveformWidget(QWidget):
         self.plot_item.addItem(self.gnd_marker_ch1)
         self.plot_item.addItem(self.gnd_marker_ch2)
 
-        # --- Dynamic grid lines (pre-allocated pool) ---
-        self._grid_v_lines = []
-        self._grid_h_lines = []
-        _POOL_V = 30
-        _POOL_H = 20
-
-        for _ in range(_POOL_V):
-            line = pg.InfiniteLine(angle=90, pen=pg.mkPen(self.GRID_MAJOR, width=0.5, style=Qt.PenStyle.DotLine))
-            line.setVisible(False)
-            self.plot_item.addItem(line, ignoreBounds=True)
-            self._grid_v_lines.append(line)
-
-        for _ in range(_POOL_H):
-            line = pg.InfiniteLine(angle=0, pen=pg.mkPen(self.GRID_MAJOR, width=0.5, style=Qt.PenStyle.DotLine))
-            line.setVisible(False)
-            self.plot_item.addItem(line, ignoreBounds=True)
-            self._grid_h_lines.append(line)
-
         # Zero-axis lines
-        self._zero_x = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#3f3f46', width=1))
-        self._zero_y = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#3f3f46', width=1))
-        self.plot_item.addItem(self._zero_x, ignoreBounds=True)
-        self.plot_item.addItem(self._zero_y, ignoreBounds=True)
-
-        # Debounce timer for grid updates
-        from PyQt6.QtCore import QTimer as _QT
-        self._grid_timer = _QT(self)
-        self._grid_timer.setSingleShot(True)
-        self._grid_timer.setInterval(30)
-        self._grid_timer.timeout.connect(self._draw_dynamic_grid)
+        # (Eliminado en Fase 2 por rediseño moderno)
 
         # --- Measurement cursors ---
         self.cursor_t1 = pg.InfiniteLine(
@@ -216,77 +199,11 @@ class WaveformWidget(QWidget):
         self.ch1_pga_gain = 1.0
         self.ch2_pga_gain = 1.0
 
-        # Connect view range changes
-        self.plot_item.sigRangeChanged.connect(self._on_range_changed)
         self._update_ranges()
 
     # ==================================================================
-    # Dynamic Grid
+    # Dynamic Grid (ELIMINADO en Fase 2: Usando grid nativo)
     # ==================================================================
-
-    def _on_range_changed(self, _view_box=None, _range=None):
-        self._grid_timer.start()
-        self._update_gnd_markers()
-
-    def _draw_dynamic_grid(self):
-        vb = self.plot_item.getViewBox()
-        x_range = vb.viewRange()[0]
-        y_range = vb.viewRange()[1]
-        x_span = x_range[1] - x_range[0]
-        y_span = y_range[1] - y_range[0]
-
-        if x_span <= 0 or y_span <= 0:
-            return
-
-        x_step = self.timebase_us
-        y_step = self.ch1_scale_mv
-
-        visible_x_divs = x_span / x_step
-        visible_y_divs = y_span / y_step
-
-        if visible_x_divs > 25 or visible_x_divs < 3:
-            x_step = self._nice_step(x_span / 10.0)
-        if visible_y_divs > 20 or visible_y_divs < 3:
-            y_step = self._nice_step(y_span / 8.0)
-
-        x_start = np.floor(x_range[0] / x_step) * x_step
-        idx = 0
-        x = x_start
-        while x <= x_range[1] and idx < len(self._grid_v_lines):
-            if abs(x) > x_step * 0.001:
-                self._grid_v_lines[idx].setPos(x)
-                self._grid_v_lines[idx].setVisible(True)
-                idx += 1
-            x += x_step
-        for i in range(idx, len(self._grid_v_lines)):
-            self._grid_v_lines[i].setVisible(False)
-
-        y_start = np.floor(y_range[0] / y_step) * y_step
-        idx = 0
-        y = y_start
-        while y <= y_range[1] and idx < len(self._grid_h_lines):
-            if abs(y) > y_step * 0.001:
-                self._grid_h_lines[idx].setPos(y)
-                self._grid_h_lines[idx].setVisible(True)
-                idx += 1
-            y += y_step
-        for i in range(idx, len(self._grid_h_lines)):
-            self._grid_h_lines[i].setVisible(False)
-
-    @staticmethod
-    def _nice_step(raw_step: float) -> float:
-        if raw_step <= 0:
-            return 1.0
-        magnitude = 10 ** np.floor(np.log10(raw_step))
-        residual = raw_step / magnitude
-        if residual <= 1.5:
-            return magnitude
-        elif residual <= 3.5:
-            return 2.0 * magnitude
-        elif residual <= 7.5:
-            return 5.0 * magnitude
-        else:
-            return 10.0 * magnitude
 
     # ==================================================================
     # Ground reference markers
@@ -388,20 +305,16 @@ class WaveformWidget(QWidget):
     # ==================================================================
 
     def _update_ranges(self):
+        # Eje Y: 8 divisiones fijas
         n_y_divs = 8
         y_max = (n_y_divs / 2) * self.ch1_scale_mv
-
-        vb = self.plot_item.getViewBox()
-        geom = vb.screenGeometry()
-        if geom.width() > 0 and geom.height() > 0:
-            aspect = geom.width() / geom.height()
-        else:
-            aspect = 16.0 / 9.0
-        n_x_divs = n_y_divs * aspect
-        x_half = (n_x_divs / 2) * self.timebase_us
-
-        self.plot_item.setXRange(-x_half, x_half, padding=0)
         self.plot_item.setYRange(-y_max, y_max, padding=0)
+        
+        # Eje X: 10 divisiones fijas centradas en el trigger (t=0)
+        # Esto garantiza que la onda NO se mueva de su sitio.
+        n_x_divs = 10
+        x_half = (n_x_divs / 2) * self.timebase_us
+        self.plot_item.setXRange(-x_half, x_half, padding=0)
 
     def set_timebase(self, us_per_div: float):
         self.timebase_us = us_per_div
@@ -431,7 +344,9 @@ class WaveformWidget(QWidget):
         self._update_gnd_markers()
 
     def set_trigger_level(self, mv: float, channel: int):
-        self.trig_line.setPos(mv)
+        # El trigger debe moverse visualmente junto con el offset del canal asociado
+        offset = self.ch1_offset_mv if channel == 0 else self.ch2_offset_mv
+        self.trig_line.setPos(mv + offset)
         color = self.CH1_COLOR if channel == 0 else self.CH2_COLOR
         self.trig_line.setPen(pg.mkPen(color, style=Qt.PenStyle.DashLine, width=1))
 
@@ -478,33 +393,34 @@ class WaveformWidget(QWidget):
     # Rendering
     # ==================================================================
 
-    def update_frame(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray, trigger_index: int = 0):
-        """Render a waveform frame. In roll mode, accumulates data and scrolls."""
+    def update_frame(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray, trigger_index: int = 0, sample_rate_hz: float = 100000.0):
+        """Render a waveform frame with real-time conversion and proportional scaling."""
         if self.roll_mode:
             self._update_roll(t_us, ch1_mv, ch2_mv)
             return
 
-        # BUG FIX: Sincronismo - Desplazar eje de tiempo según el trigger_index
-        # Si trigger_index es p.ej. 512, t_us[512] pasará a ser el tiempo 0 (centro)
-        if len(t_us) > trigger_index >= 0:
-            t_aligned = t_us - t_us[trigger_index]
-        else:
-            t_aligned = t_us
+        # 1. Convertir índices a microsegundos reales
+        t_real_us = t_us * (1000000.0 / sample_rate_hz)
 
-        # CH1
-        if self.ch1_visible and ch1_mv is not None:
-            data = self._apply_pga(ch1_mv, 0) + self.ch1_offset_mv
-            self.curve_ch1.setData(t_aligned, data)
+        # 2. Alinear con el trigger
+        if len(t_real_us) > trigger_index >= 0:
+            t_aligned = t_real_us - t_real_us[trigger_index]
         else:
-            # BUG FIX: Limpiar traza si el canal no es válido/visible
+            t_aligned = t_real_us
+
+        # 3. CH1
+        if self.ch1_visible and ch1_mv is not None:
+            data1 = self._apply_pga(ch1_mv, 0) + self.ch1_offset_mv
+            self.curve_ch1.setData(t_aligned, data1)
+        else:
             self.curve_ch1.setData([], [])
 
-        # CH2
+        # 4. CH2 (Escalado relativo al CH1 para independencia visual)
         if self.ch2_visible and ch2_mv is not None:
-            data = self._apply_pga(ch2_mv, 1) + self.ch2_offset_mv
-            self.curve_ch2.setData(t_aligned, data)
+            factor_escala = self.ch1_scale_mv / self.ch2_scale_mv
+            data2 = (self._apply_pga(ch2_mv, 1) * factor_escala) + self.ch2_offset_mv
+            self.curve_ch2.setData(t_aligned, data2)
         else:
-            # BUG FIX: Limpiar traza si el canal no es válido/visible
             self.curve_ch2.setData([], [])
 
     def _update_roll(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray):
@@ -572,39 +488,53 @@ class WaveformWidget(QWidget):
             self.curve_ch2.setData([], [])
             self._update_ranges()
 
-    def update_envelope(self, t_us, ch1_min, ch1_max, ch2_min, ch2_max):
+    def update_envelope(self, t_us: np.ndarray, ch1_min, ch1_max, ch2_min, ch2_max, sample_rate_hz: float = 100000.0):
+        # Conversión a tiempo real
+        t_real_us = t_us * (1000000.0 / sample_rate_hz)
+        
         if self.ch1_visible and ch1_min is not None and ch1_max is not None:
             lo = self._apply_pga(ch1_min, 0) + self.ch1_offset_mv
             hi = self._apply_pga(ch1_max, 0) + self.ch1_offset_mv
-            self._env_ch1_lo.setData(t_us, lo)
-            self._env_ch1_hi.setData(t_us, hi)
+            self._env_ch1_lo.setData(t_real_us, lo)
+            self._env_ch1_hi.setData(t_real_us, hi)
         if self.ch2_visible and ch2_min is not None and ch2_max is not None:
-            lo = self._apply_pga(ch2_min, 1) + self.ch2_offset_mv
-            hi = self._apply_pga(ch2_max, 1) + self.ch2_offset_mv
-            self._env_ch2_lo.setData(t_us, lo)
-            self._env_ch2_hi.setData(t_us, hi)
+            # Aplicar factor de escala relativo al CH2 para el sobre
+            factor = self.ch1_scale_mv / self.ch2_scale_mv
+            lo = (self._apply_pga(ch2_min, 1) * factor) + self.ch2_offset_mv
+            hi = (self._apply_pga(ch2_max, 1) * factor) + self.ch2_offset_mv
+            self._env_ch2_lo.setData(t_real_us, lo)
+            self._env_ch2_hi.setData(t_real_us, hi)
 
-    def update_persistence(self, frames: list):
+    def update_persistence(self, frames: list, sample_rate_hz: float = 100000.0):
         """Render persistence. frames viene en orden oldest->newest."""
         for i in range(5):
             self.persistence_curves_ch1[i].setData([], [])
             self.persistence_curves_ch2[i].setData([], [])
 
-        # BUG-M04 FIX: asignar newest -> alpha mas alto (curves[0])
-        # Revertimos para iterar newest primero
         count = min(5, len(frames))
+        factor = self.ch1_scale_mv / self.ch2_scale_mv
+
         for i in range(count):
-            f = frames[-(i + 1)]  # frames[-1] = newest, frames[-5] = oldest
-            t_us = f.get('time_axis_us')
+            f = frames[-(i + 1)]  # frames[-1] = newest
+            t_idx = f.get('time_axis_us') # En realidad son índices
             ch1 = f.get('ch0_mv')
             ch2 = f.get('ch1_mv')
+            trig_idx = f.get('trigger_index', 0)
 
-            if self.ch1_visible and ch1 is not None and t_us is not None:
-                data = self._apply_pga(ch1, 0) + self.ch1_offset_mv
-                self.persistence_curves_ch1[i].setData(t_us, data)
-            if self.ch2_visible and ch2 is not None and t_us is not None:
-                data = self._apply_pga(ch2, 1) + self.ch2_offset_mv
-                self.persistence_curves_ch2[i].setData(t_us, data)
+            if t_idx is not None:
+                t_real = t_idx * (1000000.0 / sample_rate_hz)
+                # Alineación con trigger
+                if len(t_real) > trig_idx >= 0:
+                    t_aligned = t_real - t_real[trig_idx]
+                else:
+                    t_aligned = t_real
+
+                if self.ch1_visible and ch1 is not None:
+                    data = self._apply_pga(ch1, 0) + self.ch1_offset_mv
+                    self.persistence_curves_ch1[i].setData(t_aligned, data)
+                if self.ch2_visible and ch2 is not None:
+                    data = (self._apply_pga(ch2, 1) * factor) + self.ch2_offset_mv
+                    self.persistence_curves_ch2[i].setData(t_aligned, data)
 
     # ==================================================================
     # Auto-scale

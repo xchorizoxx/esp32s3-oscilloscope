@@ -37,11 +37,11 @@ def main():
     meas_engine = MeasurementsEngine()
 
     parser      = FrameParser()
-    reader      = SerialReader(parser)
+    reader      = SerialReader(parser, data_store)
     controller  = DeviceController(reader)
 
-    # Conectar SerialReader con DataStore
-    reader.data_frame_received.connect(data_store.push)
+    # Conectar SerialReader con DataStore (Ahora se hace por inyeccion directa para performance)
+    # reader.data_frame_received.connect(data_store.push)
 
     # Arrancar hilo de mediciones
     meas_engine.start()

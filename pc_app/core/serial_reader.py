@@ -18,8 +18,8 @@ class SerialReader(QThread):
     Hilo dedicado a leer del puerto serie y parsear los datos.
     """
 
-    # Senales para comunicarse con la UI
-    data_frame_received   = pyqtSignal(dict)
+    # Senales para comunicarse con la UI (Data frame se pasa directo a DataStore)
+    measurements_received = pyqtSignal(dict)
     measurements_received = pyqtSignal(dict)
     info_received         = pyqtSignal(dict)
     ack_received          = pyqtSignal(str)
@@ -28,9 +28,10 @@ class SerialReader(QThread):
     connection_changed    = pyqtSignal(bool, str)
     error_occurred        = pyqtSignal(str)
 
-    def __init__(self, parser: FrameParser, parent=None) -> None:
+    def __init__(self, parser: FrameParser, data_store=None, parent=None) -> None:
         super().__init__(parent)
         self.parser = parser
+        self.data_store = data_store
         self.port = ""
         self.baudrate = 115200
         self._running = False
@@ -121,26 +122,34 @@ class SerialReader(QThread):
                 break
 
             try:
-                if self._serial.in_waiting > 0:
-                    # Leer en chunks relativamente grandes
-                    chunk = self._serial.read(min(self._serial.in_waiting, 4096))
-                    if chunk:
-                        bytes_in_interval += len(chunk)
-                        self._stats_mutex.lock()
-                        self._bytes_read += len(chunk)
-                        self._stats_mutex.unlock()
+                # Tarea 2: No Active Polling - read() bloquea nativamente hasta timeout=0.1
+                # Pedimos max(1, in_waiting) para leer al menos 1 byte o lo que haya en buffer.
+                chunk = self._serial.read(max(1, min(self._serial.in_waiting, 4096)))
+                
+                if chunk:
+                    bytes_in_interval += len(chunk)
+                    self._stats_mutex.lock()
+                    self._bytes_read += len(chunk)
+                    self._stats_mutex.unlock()
 
-                        # Parsear y emitir
-                        frames = self.parser.feed(chunk)
+                    # Parsear
+                    frames = self.parser.feed(chunk)
+                    frames_count = len(frames)
+                    
+                    if frames_count > 0:
+                        # Tarea 1: Mutex Grouping - Actualizar contadores una sola vez por chunk
+                        self._stats_mutex.lock()
+                        self._frames_ok += frames_count
+                        self._stats_mutex.unlock()
+                        frames_in_interval += frames_count
+
                         for frame in frames:
-                            self._stats_mutex.lock()
-                            self._frames_ok += 1
-                            self._stats_mutex.unlock()
-                            frames_in_interval += 1
                             ftype = frame.get('type')
 
                             if ftype == FRAME_DATA:
-                                self.data_frame_received.emit(frame)
+                                # Tarea 4: UI Throttling - Push directo al DataStore (sin señal Qt)
+                                if self.data_store:
+                                    self.data_store.push(frame)
                             elif ftype == FRAME_MEASUREMENTS:
                                 self.measurements_received.emit(frame)
                             elif ftype == FRAME_INFO:
@@ -150,12 +159,10 @@ class SerialReader(QThread):
                             elif ftype == FRAME_NAK:
                                 self.nak_received.emit(frame.get('cmd', ''), frame.get('reason', ''))
 
-                        self._stats_mutex.lock()
-                        self._frames_error = self.parser.frames_error
-                        self._stats_mutex.unlock()
-                else:
-                    # Pequena pausa si no hay datos para no saturar CPU
-                    time.sleep(0.001)
+                    # Sincronizar errores de CRC
+                    self._stats_mutex.lock()
+                    self._frames_error = self.parser.frames_error
+                    self._stats_mutex.unlock()
 
             except serial.SerialException as e:
                 self.error_occurred.emit(f"Desconexion inesperada: {e}")

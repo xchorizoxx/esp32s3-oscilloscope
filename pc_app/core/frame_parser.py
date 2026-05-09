@@ -76,11 +76,13 @@ class FrameParser:
 
     def __init__(self) -> None:
         self._buf = bytearray()
+        self._head = 0  # Puntero de lectura para evitar copias O(N)
         self.frames_ok:    int = 0
         self.frames_error: int = 0
 
     def reset(self) -> None:
         self._buf.clear()
+        self._head = 0
 
     def feed(self, data: bytes) -> List[dict]:
         """
@@ -91,23 +93,24 @@ class FrameParser:
         parsed: List[dict] = []
 
         while True:
-            # Buscar sync
-            idx = self._buf.find(SYNC)
+            # Buscar sync a partir del puntero actual
+            idx = self._buf.find(SYNC, self._head)
             if idx == -1:
-                # Sin sync — mantener solo el ultimo byte por si es inicio de sync
-                if len(self._buf) > 1:
-                    self._buf = self._buf[-1:]
+                # Sin sync — podemos descartar casi todo, manteniendo solo el ultimo byte
+                # por si es el primer byte de un SYNC incompleto.
+                if len(self._buf) - self._head > 1:
+                    self._head = len(self._buf) - 1
                 break
 
-            if idx > 0:
-                # Descartar bytes basura antes del sync
-                del self._buf[:idx]
+            if idx > self._head:
+                # Descartar bytes basura antes del sync (avanzando el puntero)
+                self._head = idx
 
             # Necesitamos al menos sync(2) + type(1) = 3 bytes
-            if len(self._buf) < 3:
+            if len(self._buf) - self._head < 3:
                 break
 
-            frame_type = self._buf[2]
+            frame_type = self._buf[self._head + 2]
             frame = self._try_parse(frame_type)
 
             if frame is None:
@@ -116,14 +119,21 @@ class FrameParser:
             elif frame is False:
                 # Frame invalido — saltar el sync actual y seguir buscando
                 self.frames_error += 1
-                del self._buf[:2]
+                self._head += 2
             else:
                 parsed.append(frame)
                 self.frames_ok += 1
 
+        # Truncar el buffer solo cuando el espacio consumido sea significativo
+        # Esto amortiza el costo O(N) del borrado en memoria.
+        if self._head > 4096:
+            del self._buf[:self._head]
+            self._head = 0
+
         # Sanity check: limpiar buffer si esta demasiado lleno sin avanzar
         if len(self._buf) > self._MAX_BUF:
             self._buf.clear()
+            self._head = 0
 
         return parsed
 
@@ -157,17 +167,20 @@ class FrameParser:
 
     def _check_and_consume(self, total_size: int) -> Optional[bytes]:
         """
-        Verifica CRC y consume `total_size` bytes del buffer.
-        Retorna los bytes del frame (sin CRC) si es valido, False si CRC falla, None si faltan bytes.
+        Verifica CRC y consume `total_size` bytes del buffer avanzando _head.
         """
-        if len(self._buf) < total_size:
+        if len(self._buf) - self._head < total_size:
             return None
-        raw = bytes(self._buf[:total_size])
+        
+        # Extraer el slice a partir de _head
+        raw = bytes(self._buf[self._head : self._head + total_size])
+        
         expected_crc = raw[-1]
         computed_crc = crc8(raw[:-1])
         if computed_crc != expected_crc:
             return False
-        del self._buf[:total_size]
+            
+        self._head += total_size
         return raw
 
     def _parse_data(self) -> Optional[dict]:
@@ -176,11 +189,11 @@ class FrameParser:
         if len(self._buf) < HDR + 1:  # +1 para CRC minimo
             return None
 
-        flags        = self._buf[3]
-        seq_num      = struct.unpack_from('<H', self._buf, 4)[0]
-        sample_count = struct.unpack_from('<H', self._buf, 6)[0]
-        timestamp_us = struct.unpack_from('<I', self._buf, 8)[0]
-        trigger_idx  = struct.unpack_from('<I', self._buf, 12)[0]
+        flags        = self._buf[self._head + 3]
+        seq_num      = struct.unpack_from('<H', self._buf, self._head + 4)[0]
+        sample_count = struct.unpack_from('<H', self._buf, self._head + 6)[0]
+        timestamp_us = struct.unpack_from('<I', self._buf, self._head + 8)[0]
+        trigger_idx  = struct.unpack_from('<I', self._buf, self._head + 12)[0]
 
         ch0_valid  = bool(flags & 0x01)
         ch1_valid  = bool(flags & 0x02)
@@ -238,7 +251,7 @@ class FrameParser:
         if len(self._buf) < 4:
             return None
             
-        flags     = self._buf[3]
+        flags     = self._buf[self._head + 3]
         ch0_valid = bool(flags & 0x01)
         ch1_valid = bool(flags & 0x02)
         
@@ -340,10 +353,10 @@ class FrameParser:
         if len(self._buf) < HDR + 1:
             return None
 
-        flags      = self._buf[3]
-        seq_num    = struct.unpack_from('<H', self._buf, 4)[0]
-        fft_points = struct.unpack_from('<H', self._buf, 6)[0]
-        bin_hz_x100 = struct.unpack_from('<I', self._buf, 8)[0]
+        flags      = self._buf[self._head + 3]
+        seq_num    = struct.unpack_from('<H', self._buf, self._head + 4)[0]
+        fft_points = struct.unpack_from('<H', self._buf, self._head + 6)[0]
+        bin_hz_x100 = struct.unpack_from('<I', self._buf, self._head + 8)[0]
 
         total = HDR + fft_points * 4 + 1  # float32 * points + CRC
         raw = self._check_and_consume(total)

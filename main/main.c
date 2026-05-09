@@ -61,14 +61,14 @@ static osc_sample_t *s_sample_buf = NULL;
 
 /* Queue entre ADC_CAPTURE y DSP_PROCESS */
 typedef struct {
+    uint8_t   buffer_idx;
     size_t    count;
     uint32_t  timestamp_us;
-    // No hay samples aquí — el DSP lee desde s_sample_buf protegido por mutex
 } adc_msg_t;
 static QueueHandle_t s_adc_queue = NULL;
 
-/* Buffer compartido + mutex */
-static SemaphoreHandle_t s_sample_mutex = NULL;
+/* Doble buffer para Ping-Pong (eliminamos mutex) */
+static osc_sample_t *s_sample_buf[2] = {NULL, NULL};
 
 /* --------------------------------------------------------------------------
  * Señal de test (PWM 1 kHz en GPIO3, para auto-test sin señal externa)
@@ -128,47 +128,41 @@ static void adc_capture_task(void *arg)
     // Iniciar ADC (ya inicializado en app_main, solo lo arrancamos)
     ESP_ERROR_CHECK(osc_adc_start());
 
+    uint8_t active_idx = 0;
+
     while (1) {
-        // Verificar si la configuración cambió cada 100ms (para reconfigurarse)
+        // ... (lógica de configuración omitida para brevedad, se mantiene igual)
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
         if (now - last_config_check > 100) {
             osc_config_get(&cfg);
             last_config_check = now;
-            
-            // Si hubo cambio a nivel hardware, reconfigurar el ADC de forma segura
             if (cfg.mode != last_mode || cfg.sample_rate_hz != last_rate || 
                 cfg.ch_atten[0] != last_atten0 || cfg.ch_atten[1] != last_atten1) {
-                ESP_LOGI(TAG, "ADC config changed, reconfiguring...");
                 osc_adc_reconfigure();
-                last_mode = cfg.mode;
-                last_rate = cfg.sample_rate_hz;
-                last_atten0 = cfg.ch_atten[0];
-                last_atten1 = cfg.ch_atten[1];
+                last_mode = cfg.mode; last_rate = cfg.sample_rate_hz;
+                last_atten0 = cfg.ch_atten[0]; last_atten1 = cfg.ch_atten[1];
             }
         }
 
         size_t count = 0;
-        esp_err_t ret = osc_adc_read_samples(s_sample_buf, SAMPLE_BUF_SIZE,
+        // Leemos directamente en el buffer activo del ping-pong
+        esp_err_t ret = osc_adc_read_samples(s_sample_buf[active_idx], SAMPLE_BUF_SIZE,
                                               &count, 50);
         if (ret == ESP_ERR_TIMEOUT || count == 0) continue;
 
-        // Enviar batch al DSP
-        size_t copy_count = count < SAMPLE_BUF_SIZE ? count : SAMPLE_BUF_SIZE;
+        // Enviar aviso al DSP indicando qué buffer está listo
+        adc_msg_t msg = {
+            .buffer_idx   = active_idx,
+            .count        = count,
+            .timestamp_us = s_sample_buf[active_idx][0].timestamp_us,
+        };
         
-        // Proteger el buffer compartido antes de que el DSP lo lea
-        if (xSemaphoreTake(s_sample_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            // s_sample_buf ya tiene los datos (osc_adc_read_samples escribe ahí directamente)
-            adc_msg_t msg = {
-                .count        = copy_count,
-                .timestamp_us = s_sample_buf[0].timestamp_us,
-            };
-            
-            // Si el queue está lleno, liberar el mutex inmediatamente
-            if (xQueueSend(s_adc_queue, &msg, 0) != pdTRUE) {
-                xSemaphoreGive(s_sample_mutex);
-                // ESP_LOGD(TAG, "DSP queue full, dropping batch");
-            }
-            // NOTA: El mutex lo liberará el dsp_process_task después de copiar los datos
+        if (xQueueSend(s_adc_queue, &msg, 0) == pdTRUE) {
+            // Alternar al otro buffer inmediatamente para la siguiente captura
+            active_idx ^= 1;
+        } else {
+            // Si el queue está lleno, sobreescribiremos el buffer actual en la siguiente vuelta (drop)
+            // ESP_LOGD(TAG, "DSP queue full, dropping batch");
         }
     }
 }
@@ -213,18 +207,16 @@ static void dsp_process_task(void *arg)
         osc_config_get(&cfg);
 
         if (!cfg.streaming) {
-            xSemaphoreGive(s_sample_mutex); // Liberar para que ADC pueda seguir aunque no estemos en streaming
             frame_fill = 0;
             continue;
         }
 
-        // Copiar batch del buffer compartido al acumulador local y liberar mutex
+        // Copiar batch del buffer indicado en el mensaje (Sin Mutex!)
         size_t to_copy = msg.count;
         if (frame_fill + to_copy > cfg.frame_size) {
             to_copy = cfg.frame_size - frame_fill;
         }
-        memcpy(&frame_accum[frame_fill], s_sample_buf, to_copy * sizeof(osc_sample_t));
-        xSemaphoreGive(s_sample_mutex);  // ← LIBERAR para que ADC pueda escribir otra vez
+        memcpy(&frame_accum[frame_fill], s_sample_buf[msg.buffer_idx], to_copy * sizeof(osc_sample_t));
 
         frame_fill += to_copy;
 
@@ -331,20 +323,21 @@ void app_main(void)
     ESP_ERROR_CHECK(osc_usb_init());
 
     // --- Allocate buffers in Internal RAM (Required for DMA on ESP32-S3) ---
-    s_sample_buf = (osc_sample_t *)heap_caps_malloc(
-        SAMPLE_BUF_SIZE * sizeof(osc_sample_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    if (!s_sample_buf) {
-        ESP_LOGE(TAG, "FATAL: Not enough internal memory for DMA");
-        abort();
+    // Reservamos AMBOS buffers para el sistema Ping-Pong
+    for (int i = 0; i < 2; i++) {
+        s_sample_buf[i] = (osc_sample_t *)heap_caps_malloc(
+            SAMPLE_BUF_SIZE * sizeof(osc_sample_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        if (!s_sample_buf[i]) {
+            ESP_LOGE(TAG, "FATAL: Not enough internal memory for DMA buffer %d", i);
+            abort();
+        }
     }
 
     // --- Sincronización entre tareas ---
-    s_adc_queue    = xQueueCreate(4, sizeof(adc_msg_t));
-    s_sample_mutex = xSemaphoreCreateBinary();
-    xSemaphoreGive(s_sample_mutex); // Inicialmente disponible
+    s_adc_queue = xQueueCreate(4, sizeof(adc_msg_t));
     
-    if (!s_adc_queue || !s_sample_mutex) {
-        ESP_LOGE(TAG, "FATAL: no se pudo crear sincronización");
+    if (!s_adc_queue) {
+        ESP_LOGE(TAG, "FATAL: no se pudo crear queue");
         abort();
     }
 

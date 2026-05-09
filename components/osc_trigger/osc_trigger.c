@@ -12,11 +12,10 @@ static struct {
     float           level_mv;
     osc_trig_edge_t edge;
     uint8_t         channel;
-    int16_t         prev_sample_mv10;  // última muestra de la llamada anterior
-    bool            prev_above;        // ¿estaba por encima del nivel?
+    int16_t         prev_sample_mv10;
+    bool            armed;             // Nuevo: Indica si el trigger ha cruzado la banda de histéresis opuesta
     bool            initialized;
-    // Hysteresis: ±5% del rango full scale para evitar retriggering
-    float           hyst_mv;
+    float           hyst_mv;           // Histéresis real (banda muerta)
 } s_trig = {0};
 
 /* -------------------------------------------------------------------------- */
@@ -37,9 +36,10 @@ void osc_trigger_apply_config(void)
     s_trig.level_mv = cfg.trigger_level_mv;
     s_trig.edge     = cfg.trigger_edge;
     s_trig.channel  = cfg.trigger_channel;
-    // Hysteresis: 2.5% del full scale según atenuación
-    // 12dB → full scale ≈ 2500 mV → hyst ≈ 62.5 mV
-    s_trig.hyst_mv  = 50.0f;
+    
+    // Histéresis dinámica: 3% del rango aproximado (asumimos 12dB/2500mV por ahora)
+    // 2500 * 0.03 = 75mV. Ajustamos a 40mV para mayor sensibilidad pero con estabilidad.
+    s_trig.hyst_mv  = 40.0f; 
     osc_trigger_reset();
 }
 
@@ -47,7 +47,7 @@ void osc_trigger_apply_config(void)
 void osc_trigger_reset(void)
 {
     s_trig.prev_sample_mv10 = 0;
-    s_trig.prev_above       = false;
+    s_trig.armed             = false;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -63,46 +63,61 @@ esp_err_t osc_trigger_evaluate(const osc_sample_t *samples, size_t count,
     if (s_trig.edge == OSC_TRIG_NONE) return ESP_OK;
 
     const float level10     = s_trig.level_mv * 10.0f;
-    const float hyst10_up   = (s_trig.level_mv + s_trig.hyst_mv) * 10.0f;
-    const float hyst10_down = (s_trig.level_mv - s_trig.hyst_mv) * 10.0f;
-
-    int16_t prev = s_trig.prev_sample_mv10;
-    bool    prev_above = s_trig.prev_above;
+    const float upper_band  = (s_trig.level_mv + s_trig.hyst_mv) * 10.0f;
+    const float lower_band  = (s_trig.level_mv - s_trig.hyst_mv) * 10.0f;
 
     for (size_t i = 0; i < count; i++) {
         int16_t cur = (s_trig.channel == 0) ? samples[i].ch0_mv10 : samples[i].ch1_mv10;
         float   cur_f = (float)cur;
-        bool    cur_above = (cur_f >= level10);
-
-        bool rising  = (!prev_above && cur_above && (float)prev <= hyst10_down);
-        bool falling = (prev_above && !cur_above && (float)prev >= hyst10_up);
 
         bool fire = false;
-        switch (s_trig.edge) {
-            case OSC_TRIG_EDGE_RISING:  fire = rising;          break;
-            case OSC_TRIG_EDGE_FALLING: fire = falling;         break;
-            case OSC_TRIG_EDGE_ANY:     fire = rising || falling; break;
-            default: break;
+
+        if (s_trig.edge == OSC_TRIG_EDGE_RISING) {
+            // Se arma cuando cae por debajo de la banda inferior
+            if (!s_trig.armed && cur_f < lower_band) {
+                s_trig.armed = true;
+            }
+            // Dispara cuando cruza el nivel estando armado
+            if (s_trig.armed && cur_f >= level10) {
+                fire = true;
+                s_trig.armed = false; // Desarmar hasta cruzar banda de nuevo
+            }
+        } 
+        else if (s_trig.edge == OSC_TRIG_EDGE_FALLING) {
+            // Se arma cuando sube por encima de la banda superior
+            if (!s_trig.armed && cur_f > upper_band) {
+                s_trig.armed = true;
+            }
+            // Dispara cuando cae por debajo del nivel estando armado
+            if (s_trig.armed && cur_f <= level10) {
+                fire = true;
+                s_trig.armed = false;
+            }
+        }
+        else if (s_trig.edge == OSC_TRIG_EDGE_ANY) {
+            // Simple edge para ANY (sin hysteresis compleja por ahora)
+            bool prev_above = (s_trig.prev_sample_mv10 >= (int16_t)level10);
+            bool cur_above  = (cur_f >= level10);
+            if (prev_above != cur_above) fire = true;
         }
 
         if (fire) {
             result->triggered       = true;
             result->trigger_index   = i;
             result->trigger_time_us = samples[i].timestamp_us;
-            // Interpolar para mayor precisión del timestamp
-            if (i > 0 && prev != cur) {
-                float frac = (level10 - (float)prev) / ((float)cur - (float)prev);
+            
+            // Interpolación lineal para precisión sub-muestreo
+            if (i > 0 && s_trig.prev_sample_mv10 != cur) {
+                float prev_f = (float)s_trig.prev_sample_mv10;
+                float frac = (level10 - prev_f) / (cur_f - prev_f);
                 result->trigger_time_us = samples[i-1].timestamp_us +
                     (uint32_t)(frac * (samples[i].timestamp_us - samples[i-1].timestamp_us));
             }
-            // Guardar estado DESPUÉS del trigger para la próxima llamada
             s_trig.prev_sample_mv10 = cur;
-            s_trig.prev_above       = cur_above;
             return ESP_OK;
         }
 
-        prev       = cur;
-        prev_above = cur_above;
+        s_trig.prev_sample_mv10 = cur;
     }
 
     // Sin trigger encontrado: actualizar estado con la última muestra

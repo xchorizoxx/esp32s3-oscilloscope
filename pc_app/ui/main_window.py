@@ -374,16 +374,8 @@ class MainWindow(QMainWindow):
         sample_count = latest.get('sample_count', 0)
         trigger_idx = latest.get('trigger_index', 0)
 
-        # 3. Calcular eje temporal en us
-        if rate > 0 and sample_count > 0:
-            dt_us = 1e6 / rate
-            t_us = np.arange(sample_count, dtype=np.float64) * dt_us
-            t_us = t_us - trigger_idx * dt_us
-        else:
-            t_us = latest.get('time_axis_us')
-
-        if t_us is None:
-            return
+        # 3. Preparar índices para el widget (la conversión a us se hace en el widget)
+        t_indices = np.arange(sample_count, dtype=np.float64)
 
         # 4. NUEVO: Aplicar AC coupling digital si esta activo
         ch1 = self._apply_ac_coupling(ch1_raw, 0, rate) if ch1_raw is not None else None
@@ -402,9 +394,9 @@ class MainWindow(QMainWindow):
 
         if self.waveform_widget.roll_mode:
             # En Roll mode, forzamos render normal acumulativo y saltamos otros modos
-            self.waveform_widget.update_frame(t_us, ch1, ch2, trig_idx)
+            self.waveform_widget.update_frame(t_indices, ch1, ch2, trig_idx, rate)
         elif mode == 'normal':
-            self.waveform_widget.update_frame(t_us, ch1, ch2, trig_idx)
+            self.waveform_widget.update_frame(t_indices, ch1, ch2, trig_idx, rate)
         elif mode == 'average':
             a1 = self.data_store.get_average(4, 'ch0_mv')
             a2 = self.data_store.get_average(4, 'ch1_mv')
@@ -413,35 +405,16 @@ class MainWindow(QMainWindow):
                 a1 = self._apply_ac_coupling(a1, 0, rate)
             if a2 is not None and self._ac_couple_state[1]['mode'] != 'DC':
                 a2 = self._apply_ac_coupling(a2, 1, rate)
-            self.waveform_widget.update_frame(t_us, a1, a2, trig_idx)
+            self.waveform_widget.update_frame(t_indices, a1, a2, trig_idx, rate)
         elif mode == 'envelope':
             e1 = self.data_store.get_envelope(4, 'ch0_mv')
             e2 = self.data_store.get_envelope(4, 'ch1_mv')
             min1, max1 = e1 if e1 else (None, None)
             min2, max2 = e2 if e2 else (None, None)
-            self.waveform_widget.update_envelope(t_us, min1, max1, min2, max2)
+            self.waveform_widget.update_envelope(t_indices, min1, max1, min2, max2, rate)
         elif mode == 'persistence':
-            processed_frames = []
-            for f in frames:
-                f_ch1_raw = f.get('ch0_mv')
-                f_ch2_raw = f.get('ch1_mv')
-                f_ch1 = self._apply_ac_coupling(f_ch1_raw, 0, rate) if f_ch1_raw is not None else None
-                f_ch2 = self._apply_ac_coupling(f_ch2_raw, 1, rate) if f_ch2_raw is not None else None
-                
-                f_count = f.get('sample_count', 0)
-                f_trig = f.get('trigger_index', 0)
-                if rate > 0 and f_count > 0:
-                    dt = 1e6 / rate
-                    f_t = np.arange(f_count, dtype=np.float64) * dt - f_trig * dt
-                else:
-                    f_t = f.get('time_axis_us')
-                    
-                processed_frames.append({
-                    'time_axis_us': f_t,
-                    'ch0_mv': f_ch1,
-                    'ch1_mv': f_ch2
-                })
-            self.waveform_widget.update_persistence(processed_frames)
+            # Solo pasamos la lista de frames; el widget maneja la conversión
+            self.waveform_widget.update_persistence(frames, rate)
 
         # 7. XY Render
         if not self.xy_widget.isHidden():
