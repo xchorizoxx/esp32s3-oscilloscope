@@ -465,14 +465,22 @@ class DeviceController(QObject):
         return self._send_command("CMD_GET_STATUS")[0]
 
     # --- Signal Generator ---
-    def set_gen_start(self, freq_hz: int, duty_pct: int) -> bool:
+    def set_gen_start(self, wave_type: int, freq_hz: int, duty_pct: int) -> bool:
+        """
+        Envía comando CMD_GEN_START type freq duty
+        """
+        if not self.connected:
+            return False
         if freq_hz < 1 or freq_hz > 150000:
             raise ValueError(f"Frecuencia invalida: {freq_hz} Hz. Rango: 1-150000")
         if duty_pct < 1 or duty_pct > 99:
-            raise ValueError(f"Duty cycle invalido: {duty_pct}%. Rango: 1-99")
-        ok, err = self._send_command(f"CMD_GEN_START {freq_hz} {duty_pct}")
+            raise ValueError(f"Duty invalido: {duty_pct} %. Rango: 1-99")
+            
+        ok, err = self._send_command(f"CMD_GEN_START {wave_type} {freq_hz} {duty_pct}")
         return ok
 
     def set_gen_stop(self) -> bool:
+        if not self.connected:
+            return False
         ok, err = self._send_command("CMD_GEN_STOP")
         return ok

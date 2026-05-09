@@ -29,7 +29,7 @@ class ControlsPanel(QDockWidget):
     theme_toggle_requested = pyqtSignal(str)
 
     # NEW: Signal Generator
-    gen_start_requested = pyqtSignal(int, int) # freq_hz, duty_pct
+    gen_start_requested = pyqtSignal(int, int, int) # type, freq_hz, duty_pct
     gen_stop_requested = pyqtSignal()
 
     mode_changed = pyqtSignal(int)
@@ -307,6 +307,14 @@ class ControlsPanel(QDockWidget):
         grp_gen = QGroupBox("Signal Gen (GPIO3)")
         l_gen = QVBoxLayout(grp_gen)
         
+        # Waveform Type
+        row_gtype = QHBoxLayout()
+        row_gtype.addWidget(QLabel("Type:"))
+        self.combo_gen_type = QComboBox()
+        self.combo_gen_type.addItems(["Square", "Sine", "Triangle", "Sawtooth"])
+        row_gtype.addWidget(self.combo_gen_type)
+        l_gen.addLayout(row_gtype)
+
         # Freq
         row_gfreq = QHBoxLayout()
         row_gfreq.addWidget(QLabel("Freq:"))
@@ -317,6 +325,9 @@ class ControlsPanel(QDockWidget):
         self.spin_gen_freq.setValue(1000)
         row_gfreq.addWidget(self.spin_gen_freq)
         l_gen.addLayout(row_gfreq)
+
+        # Connect combo box signal to update UI state
+        self.combo_gen_type.currentIndexChanged.connect(self._on_gen_type_changed)
 
         # Duty
         row_gduty = QHBoxLayout()
@@ -445,12 +456,22 @@ class ControlsPanel(QDockWidget):
         if not connected:
             self.lbl_fw.setText("FW: Unknown")
 
+    def _on_gen_type_changed(self, index: int):
+        # Index: 0=Square, 1=Sine, 2=Triangle, 3=Sawtooth
+        is_square = (index == 0)
+        self.spin_gen_duty.setEnabled(is_square)
+        
+        # Limit frequency based on wave type
+        max_freq = 150000 if is_square else 20000
+        self.spin_gen_freq.setRange(1, max_freq)
+
     def _on_gen_start(self):
+        w_type = self.combo_gen_type.currentIndex()
         freq = int(self.spin_gen_freq.value())
         duty = int(self.spin_gen_duty.value())
         self.btn_gen_start.setEnabled(False)
         self.btn_gen_stop.setEnabled(True)
-        self.gen_start_requested.emit(freq, duty)
+        self.gen_start_requested.emit(w_type, freq, duty)
 
     def _on_gen_stop(self):
         self.btn_gen_start.setEnabled(True)
