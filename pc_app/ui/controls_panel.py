@@ -43,6 +43,9 @@ class ControlsPanel(QDockWidget):
     # Cursor visibility
     time_cursors_toggled = pyqtSignal(bool)
     volt_cursors_toggled = pyqtSignal(bool)
+    
+    # Trigger additions
+    holdoff_changed = pyqtSignal(int)
 
     # FFT Config
     fft_enabled_changed = pyqtSignal(int)
@@ -377,6 +380,8 @@ class ControlsPanel(QDockWidget):
         self.btn_stop.clicked.connect(self.stop_stream_requested.emit)
         self.btn_single.clicked.connect(self.single_shot_requested.emit)
         self.btn_autoscale.clicked.connect(self.auto_scale_requested.emit)
+
+        self.trig_panel.holdoff_changed.connect(self.holdoff_changed.emit)
 
         self.cb_mode.currentIndexChanged.connect(lambda i: self.mode_changed.emit(self.cb_mode.itemData(i)))
         self.cb_oversampling.currentIndexChanged.connect(lambda i: self.oversampling_changed.emit(self.cb_oversampling.itemData(i)))

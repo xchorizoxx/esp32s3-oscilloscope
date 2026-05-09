@@ -120,8 +120,6 @@ esp_err_t osc_trigger_evaluate(const osc_sample_t *samples, size_t count,
         s_trig.prev_sample_mv10 = cur;
     }
 
-    // Sin trigger encontrado: actualizar estado con la última muestra
-    s_trig.prev_sample_mv10 = prev;
-    s_trig.prev_above       = prev_above;
+    // Sin trigger encontrado: el estado ya se actualizó en el bucle
     return ESP_OK;
 }

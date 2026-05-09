@@ -174,10 +174,7 @@ class MainWindow(QMainWindow):
         self.reader.connection_changed.connect(self._on_connection_changed)
         self.reader.info_received.connect(cp.update_device_info)
 
-        # Mediciones del firmware (frames MEASUREMENTS)
-        self.reader.measurements_received.connect(self.meas_panel.update_measurements)
-
-        # NUEVO: Mediciones locales del MeasurementsEngine
+        # NUEVO: Mediciones locales del MeasurementsEngine (ignorar las del hardware para evitar jitter)
         self.meas_engine.measurements_ready.connect(self.meas_panel.update_measurements)
         self.meas_engine.measurements_ready.connect(self._on_measurements_update)
 
@@ -259,40 +256,6 @@ class MainWindow(QMainWindow):
             pass
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    def _apply_ac_coupling(self, samples: np.ndarray, ch: int, sample_rate: int) -> np.ndarray:
-        """
-        Aplica filtro de visualización según el modo seleccionado (DC, AC, GND).
-        Usa un Integrador (EMA) para aislar la componente DC de la alterna.
-        """
-        mode = self._ac_couple_state[ch].get('mode', 'DC')
-        
-        if mode == 'GND':
-            return np.zeros_like(samples)
-            
-        if mode == 'DC':
-            return samples
-            
-        if len(samples) == 0:
-            return samples
-
-        # 1. Obtenemos el DC inmediato de este frame
-        frame_mean = np.mean(samples)
-
-        # 2. Actualizamos el integrador lento (EMA)
-        alpha_ema = 0.05
-        state = self._ac_couple_state[ch]
-
-        if state['dc_offset'] is None:
-            state['dc_offset'] = frame_mean
-        else:
-            state['dc_offset'] = alpha_ema * frame_mean + (1.0 - alpha_ema) * state['dc_offset']
-
-        # 3. Retornar según el modo
-        if mode == 'AC':
-            ac_signal = samples - state['dc_offset']
-            return ac_signal.astype(samples.dtype)
-            
-        return samples
 
     def _on_fft_window_changed(self, window: str):
         """Propaga cambio de ventana FFT al engine."""

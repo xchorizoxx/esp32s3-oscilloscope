@@ -7,10 +7,10 @@ Displays key metrics in a compact horizontal table format.
 
 from PyQt6.QtWidgets import (
     QDockWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QVBoxLayout, QWidget
+    QHeaderView, QVBoxLayout, QWidget, QMenu
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 
 
 class MeasurementsPanel(QDockWidget):
@@ -55,8 +55,14 @@ class MeasurementsPanel(QDockWidget):
         # Colored vertical headers for row labels
         vh = self.table.verticalHeader()
         vh.setFont(QFont("Inter", 8, QFont.Weight.Bold))
+        vh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        vh.customContextMenuRequested.connect(self._show_context_menu)
+
+        # Default visible rows: VPP, VMAX, VMIN, FREQ (0, 4, 5, 6)
+        self._visible_rows = {0, 4, 5, 6}
 
         for r in range(n_rows):
+            self.table.setRowHidden(r, r not in self._visible_rows)
             for c in range(2):
                 item = QTableWidgetItem("--")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -72,6 +78,35 @@ class MeasurementsPanel(QDockWidget):
 
         # Set max height to keep it compact when docked at bottom
         self.setMaximumHeight(280)
+
+        # EMA state for smoothing [ch][key] = value
+        self._ema_state = {0: {}, 1: {}}
+        self._ema_alpha = 0.15  # Factor de suavizado
+
+    def _show_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #18181b; color: #d4d4d8; border: 1px solid #3f3f46; font-size: 10px; }
+            QMenu::item:selected { background-color: #164e63; }
+        """)
+
+        for r, (label, _, _) in enumerate(self.ROW_DEFS):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(r in self._visible_rows)
+            # Use default argument binding to capture 'r' in lambda
+            action.triggered.connect(lambda checked, row=r: self._toggle_row(row, checked))
+            menu.addAction(action)
+
+        # Show menu at the cursor position mapping it to global coordinates
+        menu.exec(self.table.verticalHeader().mapToGlobal(pos))
+
+    def _toggle_row(self, row: int, visible: bool):
+        if visible:
+            self._visible_rows.add(row)
+        else:
+            self._visible_rows.discard(row)
+        self.table.setRowHidden(row, not visible)
 
     @staticmethod
     def _fmt_v(v):
@@ -113,12 +148,29 @@ class MeasurementsPanel(QDockWidget):
             self._fill_col(1, ch1)
 
     def _fill_col(self, col: int, meas: dict):
-        if not meas.get('valid', False):
+        # We assume meas_engine always returns valid dict for Python engine.
+        is_valid = meas.get('valid', True)
+        if not is_valid:
             for r in range(len(self.ROW_DEFS)):
                 self.table.item(r, col).setText("--")
+            self._ema_state[col].clear()
             return
 
+        state = self._ema_state[col]
+
         for r, (label, key, fmt_name) in enumerate(self.ROW_DEFS):
-            fmt = getattr(self, fmt_name)
-            val = meas.get(key, 0)
-            self.table.item(r, col).setText(fmt(val))
+            val = meas.get(key, 0.0)
+            
+            # EMA Filtering
+            if key in state:
+                # Evitar suavizar frecuencia si hay saltos gigantes (>50%)
+                if key == 'freq_hz' and (val == 0 or abs(val - state[key]) > state[key]*0.5):
+                    state[key] = val
+                else:
+                    state[key] = self._ema_alpha * val + (1.0 - self._ema_alpha) * state[key]
+            else:
+                state[key] = val
+            
+            ema_val = state[key]
+            fmt_func = getattr(self, fmt_name)
+            self.table.item(r, col).setText(fmt_func(ema_val))

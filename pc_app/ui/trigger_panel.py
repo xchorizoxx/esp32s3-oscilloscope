@@ -18,6 +18,7 @@ class TriggerPanel(QWidget):
     # mv, ch_idx (solo para mover la linea en el grafico sin enviar comando)
     trigger_ui_preview = pyqtSignal(float, int)
     pre_trigger_changed = pyqtSignal(int)
+    holdoff_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,16 +69,27 @@ class TriggerPanel(QWidget):
         self.slider_lvl.sliderReleased.connect(self._emit_hw_update)
         layout.addWidget(self.slider_lvl)
 
-        # Pre-trigger
+        # Pre-trigger & Holdoff
         row3 = QHBoxLayout()
         self.spin_pre = QSpinBox()
         self.spin_pre.setRange(0, 100)
         self.spin_pre.setSuffix(" %")
         self.spin_pre.setValue(50)
+        self.spin_pre.setToolTip("Pre-trigger (porcentaje del frame antes del disparo)")
         self.spin_pre.valueChanged.connect(self.pre_trigger_changed.emit)
+
+        self.spin_holdoff = QSpinBox()
+        self.spin_holdoff.setRange(0, 5000)
+        self.spin_holdoff.setSingleStep(10)
+        self.spin_holdoff.setSuffix(" ms")
+        self.spin_holdoff.setValue(0)
+        self.spin_holdoff.setToolTip("Holdoff: Tiempo muerto después de un disparo (0 = auto)")
+        self.spin_holdoff.valueChanged.connect(self.holdoff_changed.emit)
 
         row3.addWidget(QLabel("Pre:"))
         row3.addWidget(self.spin_pre)
+        row3.addWidget(QLabel("Hold:"))
+        row3.addWidget(self.spin_holdoff)
         layout.addLayout(row3)
 
     def _on_spin_value_changed(self, val: float):

@@ -109,19 +109,21 @@ class RenderPipeline:
 
         # 8. FFT Render
         if fft_widget and not fft_widget.isHidden():
-            window = self.fft_engine.last_window
-            if ch1 is not None:
-                res1 = self.fft_engine.compute(ch1, rate, window=window)
-                if res1:
-                    fft_widget.update_fft(0, res1['freqs'], res1['magnitudes_mv'],
-                                          res1['magnitudes_db'], res1['peak_freq'],
-                                          res1['peak_magnitude_mv'])
-            if ch2 is not None:
-                res2 = self.fft_engine.compute(ch2, rate, window=window)
-                if res2:
-                    fft_widget.update_fft(1, res2['freqs'], res2['magnitudes_mv'],
-                                          res2['magnitudes_db'], res2['peak_freq'],
-                                          res2['peak_magnitude_mv'])
+            fft_mags = latest.get('fft_magnitudes')
+            fft_bin_hz = latest.get('fft_bin_hz')
+            
+            if fft_mags is not None and fft_bin_hz is not None and len(fft_mags) > 0:
+                freqs = np.arange(len(fft_mags)) * fft_bin_hz
+                # Evitar log10(0)
+                mags_safe = np.maximum(fft_mags, 1e-6)
+                mags_db = 20 * np.log10(mags_safe)
+                
+                peak_idx = np.argmax(fft_mags)
+                peak_freq = freqs[peak_idx]
+                peak_mag = fft_mags[peak_idx]
+                
+                # Por ahora el ESP32 solo calcula FFT del CH0, lo pasamos al canal 0
+                fft_widget.update_fft(0, freqs, fft_mags, mags_db, peak_freq, peak_mag)
 
         return True
 
@@ -132,20 +134,13 @@ class RenderPipeline:
         if state['mode'] == 'DC' or samples is None:
             return samples
 
-        # Single-pole high-pass: fc ≈ 10 Hz
-        fc = 10.0
-        rc = 1.0 / (2.0 * np.pi * fc)
-        dt = 1.0 / sample_rate
-        alpha = rc / (rc + dt)
-
+        # Fast vectorized frame-level EMA (avoids slow Python loops)
+        frame_mean = np.mean(samples)
         if state['dc_offset'] is None:
-            state['dc_offset'] = float(np.mean(samples))
+            state['dc_offset'] = float(frame_mean)
 
-        # EMA filter
-        dc = state['dc_offset']
-        result = np.empty_like(samples)
-        for i in range(len(samples)):
-            dc = alpha * dc + (1 - alpha) * samples[i]
-            result[i] = samples[i] - dc
-        state['dc_offset'] = dc
-        return result
+        # Update slow integrador
+        alpha_ema = 0.05
+        state['dc_offset'] = alpha_ema * frame_mean + (1.0 - alpha_ema) * state['dc_offset']
+
+        return samples - state['dc_offset']

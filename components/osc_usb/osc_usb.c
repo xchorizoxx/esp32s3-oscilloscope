@@ -308,6 +308,20 @@ static size_t build_data_frame(const osc_frame_t *frame, uint8_t *out_buf)
         pos += data_bytes;
     }
 
+    // FFT data (si activo y adjunto)
+    if (flags & OSC_FLAG_FFT_ATTACHED) {
+        // Añadimos FFT_POINTS(2) y BIN_HZ(4)
+        out_buf[pos++] = (uint8_t)(frame->fft_points & 0xFF);
+        out_buf[pos++] = (uint8_t)((frame->fft_points >> 8) & 0xFF);
+        memcpy(&out_buf[pos], &frame->fft_bin_hz, 4);
+        pos += 4;
+        
+        // Añadimos array de magnitudes (float)
+        size_t fft_bytes = frame->fft_points * sizeof(float);
+        memcpy(&out_buf[pos], frame->fft_magnitudes_ch0, fft_bytes);
+        pos += fft_bytes;
+    }
+
     // CRC8 sobre todos los bytes anteriores
     out_buf[pos] = crc8(out_buf, pos);
     pos++;

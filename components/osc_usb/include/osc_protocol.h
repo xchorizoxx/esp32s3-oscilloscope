@@ -98,9 +98,9 @@ extern "C" {
 #define OSC_FW_VERSION_MINOR 0
 
 // Máximo tamaño de un frame de datos (para dimensionar buffers)
-// 16 (header) + 2*4096*2 (dual 4096 samples) + 1 (CRC) = 16401 bytes
+// 16 (header) + 2*4096*2 (dual 4096 samples) + FFT_HEADER(6) + 512*4 (FFT float) + 1 (CRC) = 18455 bytes
 // Redondeamos a múltiplo de 16 para alineación de caché.
-#define OSC_MAX_FRAME_BYTES 16416
+#define OSC_MAX_FRAME_BYTES 20480
 
 /* =========================================================================
  * Comandos ASCII (PC → ESP32, terminados en '\n')

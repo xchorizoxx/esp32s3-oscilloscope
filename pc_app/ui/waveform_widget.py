@@ -9,6 +9,7 @@ Correcciones:
 
 import pyqtgraph as pg
 import numpy as np
+from scipy.interpolate import make_interp_spline
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QFont
@@ -490,17 +491,33 @@ class WaveformWidget(QWidget):
             t_aligned = t_real_us
 
         # 3. CH1
-        if self.ch1_visible and ch1_mv is not None:
+        if self.ch1_visible and ch1_mv is not None and len(t_aligned) > 0:
             data1 = self._apply_pga(ch1_mv, 0) + self.ch1_offset_mv
-            self.curve_ch1.setData(t_aligned, data1)
+            pts_per_div = self.timebase_us / (1000000.0 / sample_rate_hz)
+            if pts_per_div < 50 and len(t_aligned) >= 4:
+                factor = int(50 / pts_per_div) + 1
+                new_len = len(data1) * factor
+                t_new = np.linspace(t_aligned[0], t_aligned[-1], new_len)
+                spline = make_interp_spline(t_aligned, data1, k=3)
+                self.curve_ch1.setData(t_new, spline(t_new))
+            else:
+                self.curve_ch1.setData(t_aligned, data1)
         else:
             self.curve_ch1.setData([], [])
 
         # 4. CH2 (scaled relative to CH1 for visual independence)
-        if self.ch2_visible and ch2_mv is not None:
+        if self.ch2_visible and ch2_mv is not None and len(t_aligned) > 0:
             factor_escala = self.ch1_scale_mv / self.ch2_scale_mv
             data2 = (self._apply_pga(ch2_mv, 1) * factor_escala) + self.ch2_offset_mv
-            self.curve_ch2.setData(t_aligned, data2)
+            pts_per_div = self.timebase_us / (1000000.0 / sample_rate_hz)
+            if pts_per_div < 50 and len(t_aligned) >= 4:
+                factor = int(50 / pts_per_div) + 1
+                new_len = len(data2) * factor
+                t_new = np.linspace(t_aligned[0], t_aligned[-1], new_len)
+                spline = make_interp_spline(t_aligned, data2, k=3)
+                self.curve_ch2.setData(t_new, spline(t_new))
+            else:
+                self.curve_ch2.setData(t_aligned, data2)
         else:
             self.curve_ch2.setData([], [])
 

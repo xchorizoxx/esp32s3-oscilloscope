@@ -203,8 +203,20 @@ class FrameParser:
 
         n_channels = (1 if ch0_valid else 0) + (1 if ch1_valid else 0)
         sample_bytes = sample_count * 2 * n_channels  # int16 = 2 bytes
+        
         total = HDR + sample_bytes + 1  # +1 CRC
+        
+        fft_points = 0
+        fft_bytes = 0
+        if fft_att:
+            # Necesitamos poder leer fft_points (2 bytes) para calcular el total
+            if len(self._buf) - self._head < HDR + sample_bytes + 2:
+                return None
+            fft_points = struct.unpack_from('<H', self._buf, self._head + HDR + sample_bytes)[0]
+            fft_bytes = fft_points * 4
+            total += 6 + fft_bytes # 2(points) + 4(bin_hz) + magnitudes
 
+        # Leer TODO el paquete de una vez para validar el CRC final
         raw = self._check_and_consume(total)
         if raw is None:
             return None
@@ -223,10 +235,22 @@ class FrameParser:
         if ch1_valid:
             raw_int16 = np.frombuffer(raw[offset:offset + sample_count * 2], dtype='<i2')
             ch1_mv = raw_int16.astype(np.float32) / 10.0
+            offset += sample_count * 2
 
-        # time_axis_us: placeholder — el eje temporal real en us se calcula
-        # en el render loop usando sample_rate y trigger_index, ya que el
-        # parser no conoce la tasa de muestreo configurada.
+        # Parse FFT si viene adjunta
+        fft_bin_hz = 0.0
+        fft_magnitudes = None
+
+        if fft_att:
+            # offset ya apunta al inicio del bloque FFT
+            fft_points = struct.unpack_from('<H', raw, offset)[0]
+            offset += 2
+            fft_bin_hz = struct.unpack_from('<f', raw, offset)[0]
+            offset += 4
+            fft_magnitudes = np.frombuffer(raw[offset:offset + fft_bytes], dtype='<f4')
+            offset += fft_bytes
+
+        # time_axis_us: placeholder
         time_axis_us = np.arange(sample_count, dtype=np.float64)
 
         return {
@@ -244,6 +268,8 @@ class FrameParser:
             'ch0_mv':        ch0_mv,
             'ch1_mv':        ch1_mv,
             'time_axis_us':  time_axis_us,
+            'fft_magnitudes': fft_magnitudes,
+            'fft_bin_hz':    fft_bin_hz,
         }
 
     def _parse_measurements(self) -> Optional[dict]:

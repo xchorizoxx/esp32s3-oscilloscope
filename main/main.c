@@ -55,8 +55,6 @@ static int16_t s_ch0_buf[MAX_FRAME_SAMPLES];
 static int16_t s_ch1_buf[MAX_FRAME_SAMPLES];
 static float   s_fft_buf[MAX_FRAME_SAMPLES / 2];  // magnitudes FFT
 
-/* Buffer de muestras raw del ADC (para la tarea ADC_CAPTURE) */
-static osc_sample_t *s_sample_buf = NULL;
 #define SAMPLE_BUF_SIZE  2048  // osc_sample_t
 
 /* Queue entre ADC_CAPTURE y DSP_PROCESS */
