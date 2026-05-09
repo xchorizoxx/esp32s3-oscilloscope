@@ -215,14 +215,21 @@ class WaveformWidget(QWidget):
             self.plot_item.addItem(line)
             self._grid_lines_y.append(line)
 
-        # --- Measurement overlay (TextItems on the waveform) ---
-        overlay_font = QFont('Inter', 10, QFont.Weight.Bold)
-        self._overlay_ch1 = pg.TextItem('', color=self.CH1_COLOR, anchor=(0, 1))
-        self._overlay_ch2 = pg.TextItem('', color=self.CH2_COLOR, anchor=(1, 1))
-        self._overlay_tdiv = pg.TextItem('', color='#a1a1aa', anchor=(0.5, 0))
-        for item in [self._overlay_ch1, self._overlay_ch2, self._overlay_tdiv]:
-            item.setFont(overlay_font)
-            self.plot_item.addItem(item)
+        # --- Measurement overlay (fixed QLabels on top of the plot) ---
+        overlay_style_ch1 = f'color: {self.CH1_COLOR}; background: rgba(9,9,11,180); padding: 2px 6px; border-radius: 3px; font: bold 10px "Inter";'
+        overlay_style_ch2 = f'color: {self.CH2_COLOR}; background: rgba(9,9,11,180); padding: 2px 6px; border-radius: 3px; font: bold 10px "Inter";'
+        overlay_style_tdiv = 'color: #a1a1aa; background: rgba(9,9,11,180); padding: 2px 6px; border-radius: 3px; font: bold 10px "Inter";'
+
+        self._overlay_ch1 = QLabel('CH1  --', self.plot_widget)
+        self._overlay_ch1.setStyleSheet(overlay_style_ch1)
+        self._overlay_ch1.move(8, 8)
+
+        self._overlay_ch2 = QLabel('CH2  --', self.plot_widget)
+        self._overlay_ch2.setStyleSheet(overlay_style_ch2)
+        # Position will be adjusted on resize
+
+        self._overlay_tdiv = QLabel('', self.plot_widget)
+        self._overlay_tdiv.setStyleSheet(overlay_style_tdiv)
 
         self._update_ranges()
 
@@ -347,18 +354,8 @@ class WaveformWidget(QWidget):
         for i, line in enumerate(self._grid_lines_x):
             line.setPos(x_min + i * step)
 
-        # Update overlay positions (anchored to view corners)
-        self._overlay_ch1.setPos(x_min, -4 * self.ch1_scale_mv)
-        self._overlay_ch2.setPos(x_max, -4 * self.ch1_scale_mv)
-        self._overlay_tdiv.setPos((x_min + x_max) / 2, 4 * self.ch1_scale_mv)
-
     def update_overlay(self, ch0_meas: dict = None, ch1_meas: dict = None):
-        """Update the measurement overlay on the waveform canvas.
-        
-        Args:
-            ch0_meas: dict with 'freq_hz', 'vpp_mv' for CH1
-            ch1_meas: dict with 'freq_hz', 'vpp_mv' for CH2
-        """
+        """Update the fixed measurement overlay labels."""
         def fmt_freq(f):
             if f <= 0: return "-- Hz"
             return f"{f:.0f} Hz" if f < 1000 else f"{f/1000:.1f} kHz"
@@ -369,23 +366,30 @@ class WaveformWidget(QWidget):
         if ch0_meas and ch0_meas.get('valid'):
             freq = fmt_freq(ch0_meas.get('freq_hz', 0))
             vpp = fmt_v(ch0_meas.get('vpp_mv', 0))
-            self._overlay_ch1.setText(f"CH1  {freq}  {vpp}  {self.ch1_scale_mv:.0f}mV/div")
+            self._overlay_ch1.setText(f"  CH1  {freq}  {vpp}  {self.ch1_scale_mv:.0f}mV/div  ")
         else:
-            self._overlay_ch1.setText("CH1  --")
+            self._overlay_ch1.setText("  CH1  --  ")
+        self._overlay_ch1.adjustSize()
 
         if ch1_meas and ch1_meas.get('valid'):
             freq = fmt_freq(ch1_meas.get('freq_hz', 0))
             vpp = fmt_v(ch1_meas.get('vpp_mv', 0))
-            self._overlay_ch2.setText(f"CH2  {freq}  {vpp}  {self.ch2_scale_mv:.0f}mV/div")
+            self._overlay_ch2.setText(f"  CH2  {freq}  {vpp}  {self.ch2_scale_mv:.0f}mV/div  ")
         else:
-            self._overlay_ch2.setText("CH2  --")
+            self._overlay_ch2.setText("  CH2  --  ")
+        self._overlay_ch2.adjustSize()
+        # Position CH2 in top-right corner
+        pw = self.plot_widget.width()
+        self._overlay_ch2.move(pw - self._overlay_ch2.width() - 8, 8)
 
-        # T/div display
+        # T/div display centered at top
         t = self.timebase_us
         if t >= 1000:
-            self._overlay_tdiv.setText(f"{t/1000:.0f} ms/div")
+            self._overlay_tdiv.setText(f"  {t/1000:.0f} ms/div  ")
         else:
-            self._overlay_tdiv.setText(f"{t:.0f} µs/div")
+            self._overlay_tdiv.setText(f"  {t:.0f} µs/div  ")
+        self._overlay_tdiv.adjustSize()
+        self._overlay_tdiv.move((pw - self._overlay_tdiv.width()) // 2, 8)
 
     def set_timebase(self, us_per_div: float):
         self.timebase_us = us_per_div
