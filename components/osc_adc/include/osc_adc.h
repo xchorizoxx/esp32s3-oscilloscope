@@ -87,6 +87,17 @@ uint32_t osc_adc_get_overflow_count(void);
  */
 void osc_adc_reset_overflow_count(void);
 
+/**
+ * @brief Leer la media de N muestras ADC de un canal en mV*10.
+ *        Usa adc_continuous_read() internamente (no requiere task notification).
+ *        Funciona desde cualquier contexto de tarea.
+ *        Timeout total ~timeout_ms.
+ * @param ch_idx    Índice de canal (0=CH0, 1=CH1)
+ * @param timeout_ms  Timeout en ms para cada lectura
+ * @return Media en mV*10, o 14500 (1450.0 mV) como fallback si timeout
+ */
+int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

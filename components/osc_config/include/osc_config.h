@@ -46,6 +46,11 @@ typedef struct {
     uint32_t        auto_trigger_timeout_ms;
     bool            measurements_enabled;  ///< calcular Vpp/Vrms/etc en DSP
     uint8_t         oversample_factor;     ///< solo en OVERSAMPLE mode: 4/8/16
+
+    /* PGA (Programmable Gain Amplifier) */
+    uint8_t         pga_step;              ///< paso de ganancia PGA 0-7
+    bool            pga_enabled;           ///< PGA habilitado
+    float           pga_vg_mv;             ///< VG (virtual ground) en mV
 } osc_config_t;
 
 /** Configuración por defecto */
@@ -65,6 +70,9 @@ typedef struct {
     .auto_trigger_timeout_ms  = 200,                 \
     .measurements_enabled     = true,                \
     .oversample_factor        = 1,                   \
+    .pga_step                 = 0,                   \
+    .pga_enabled              = false,               \
+    .pga_vg_mv                = 1600.0f,             \
 }
 
 /* =========================================================================
@@ -96,6 +104,9 @@ esp_err_t osc_config_set_fft(bool en);
 esp_err_t osc_config_set_frame_size(uint32_t n);
 esp_err_t osc_config_set_pre_trigger(uint32_t samples);
 esp_err_t osc_config_set_oversample(uint8_t factor);
+esp_err_t osc_config_set_pga_step(uint8_t step);
+esp_err_t osc_config_set_pga_enabled(bool en);
+esp_err_t osc_config_set_pga_vg(float vg_mv);
 
 /** @brief Persistir configuración en NVS flash. */
 esp_err_t osc_config_save_nvs(void);

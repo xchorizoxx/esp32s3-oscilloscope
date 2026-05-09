@@ -46,6 +46,11 @@ esp_err_t osc_usb_send_nak(const char *cmd_str, const char *reason);
  */
 bool osc_usb_is_connected(void);
 
+/**
+ * @brief Enviar frame PGA_INFO (0x08) con estado completo del PGA.
+ */
+esp_err_t osc_usb_send_pga_info(void);
+
 #ifdef __cplusplus
 }
 #endif

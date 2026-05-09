@@ -5,6 +5,7 @@ idf_component_register(
         osc_config
         osc_dsp
         osc_gen
+        osc_pga
         freertos
         esp_common
         log

@@ -22,6 +22,7 @@ from .xy_widget import XYWidget
 from .controls_panel import ControlsPanel
 from .measurements_panel import MeasurementsPanel
 from .status_bar import AppStatusBar
+from .pga_cal_dialog import PgaCalDialog
 from core.render_pipeline import RenderPipeline
 
 
@@ -132,6 +133,11 @@ class MainWindow(QMainWindow):
         cp.gen_start_requested.connect(self.controller.set_gen_start)
         cp.gen_stop_requested.connect(self.controller.set_gen_stop)
 
+        # PGA
+        cp.pga_enabled_changed.connect(self._on_pga_enabled_changed)
+        cp.pga_step_changed.connect(self._on_pga_step_changed)
+        cp.pga_cal_requested.connect(self._on_pga_cal_requested)
+
         cp.timebase_changed.connect(self.waveform_widget.set_timebase)
         cp.roll_mode_changed.connect(self.waveform_widget.set_roll_mode)
         cp.roll_paused_changed.connect(self.waveform_widget.set_roll_paused)
@@ -180,6 +186,9 @@ class MainWindow(QMainWindow):
 
         # NUEVO: FFT controls
         self.fft_widget.window_changed.connect(self._on_fft_window_changed)
+
+        # PGA info from reader
+        self.reader.pga_info_received.connect(self._on_pga_info_received)
 
     def _setup_shortcuts(self):
         """Keyboard shortcuts for oscilloscope-style operation."""
@@ -261,6 +270,50 @@ class MainWindow(QMainWindow):
         """Propaga cambio de ventana FFT al engine."""
         # El engine lee el parametro en cada compute(), asi que solo necesitamos guardarlo
         self.fft_engine.last_window = window.lower()
+
+    # ------------------------------------------------------------------
+    # PGA handlers
+    # ------------------------------------------------------------------
+
+    def _on_pga_info_received(self, info: dict):
+        self.controls_panel.update_pga_info(info)
+
+        cfg = self.controller.current_config
+        step = info.get('step', 0)
+        enabled = info.get('enabled', False)
+        gains = info.get('gain_eff', [1.0]*8)
+        offsets = info.get('offset_cal', [0.0]*8)
+        vg = info.get('vg_mv', 1600.0)
+
+        gain_eff = gains[step] if step < len(gains) else 1.0
+        offset = offsets[step] if step < len(offsets) else 0.0
+        self.waveform_widget.set_pga_params(enabled, step, vg, gain_eff, offset)
+
+        bws = info.get('bw_hz', [1000000.0]*8)
+        bw = bws[step] if step < len(bws) else 1000000.0
+        self.meas_panel.update_pga_display(gain_eff, bw)
+
+    def _on_pga_enabled_changed(self, enabled: bool):
+        if not self.controller.connected:
+            return
+        self.controller.current_config.pga_enabled = enabled
+        self.controls_panel.cb_pga_step.setEnabled(enabled)
+        self.controls_panel.btn_pga_cal.setEnabled(enabled)
+        if enabled:
+            self.controller.pga_get_info()
+
+    def _on_pga_step_changed(self, step: int):
+        if not self.controller.connected:
+            return
+        self.controller.set_pga_step(step)
+        self.controller.pga_get_info()
+
+    def _on_pga_cal_requested(self):
+        if not self.controller.connected:
+            return
+        dialog = PgaCalDialog(self.controller, self)
+        dialog.exec()
+        self.controller.pga_get_info()
 
     def _populate_ports(self):
         current = self.controls_panel.cb_ports.currentText()

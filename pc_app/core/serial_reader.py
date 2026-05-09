@@ -10,7 +10,7 @@ Mejoras de robustez:
 import time
 import serial
 from PyQt6.QtCore import QThread, pyqtSignal, QMutex
-from .frame_parser import FrameParser, FRAME_DATA, FRAME_MEASUREMENTS, FRAME_INFO, FRAME_ACK, FRAME_NAK
+from .frame_parser import FrameParser, FRAME_DATA, FRAME_MEASUREMENTS, FRAME_INFO, FRAME_ACK, FRAME_NAK, FRAME_PGA_INFO
 
 
 class SerialReader(QThread):
@@ -25,6 +25,7 @@ class SerialReader(QThread):
     nak_received          = pyqtSignal(str, str)
     # Emite (connected: bool, port: str) para que la status bar muestre el puerto
     connection_changed    = pyqtSignal(bool, str)
+    pga_info_received     = pyqtSignal(dict)
     error_occurred        = pyqtSignal(str)
 
     def __init__(self, parser: FrameParser, data_store=None, parent=None) -> None:
@@ -157,6 +158,8 @@ class SerialReader(QThread):
                                 self.ack_received.emit(frame.get('cmd', ''))
                             elif ftype == FRAME_NAK:
                                 self.nak_received.emit(frame.get('cmd', ''), frame.get('reason', ''))
+                            elif ftype == FRAME_PGA_INFO:
+                                self.pga_info_received.emit(frame)
 
                     # Sincronizar errores de CRC
                     self._stats_mutex.lock()

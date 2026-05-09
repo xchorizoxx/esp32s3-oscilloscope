@@ -27,6 +27,8 @@ class MeasurementsPanel(QDockWidget):
         ("DUTY",  'duty_cycle_pct','_fmt_pct'),
         ("RISE",  'rise_time_us',  '_fmt_t'),
         ("FALL",  'fall_time_us',  '_fmt_t'),
+        ("PGA G", 'pga_gain',      '_fmt_gain'),
+        ("BW",    'pga_bw',        '_fmt_bw'),
     ]
 
     def __init__(self, title="Measurements", parent=None):
@@ -58,8 +60,8 @@ class MeasurementsPanel(QDockWidget):
         vh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         vh.customContextMenuRequested.connect(self._show_context_menu)
 
-        # Default visible rows: VPP, VMAX, VMIN, FREQ (0, 4, 5, 6)
-        self._visible_rows = {0, 4, 5, 6}
+        # Default visible rows: VPP, VMAX, VMIN, FREQ, PGA G, BW (0, 4, 5, 6, 11, 12)
+        self._visible_rows = {0, 4, 5, 6, 11, 12}
 
         for r in range(n_rows):
             self.table.setRowHidden(r, r not in self._visible_rows)
@@ -133,6 +135,21 @@ class MeasurementsPanel(QDockWidget):
     @staticmethod
     def _fmt_pct(p):
         return f"{p:.1f} %"
+
+    @staticmethod
+    def _fmt_gain(g):
+        return f"x{g:.2f}"
+
+    @staticmethod
+    def _fmt_bw(bw):
+        if bw >= 1000000:
+            return f"{bw/1000000:.1f} MHz"
+        return f"{bw/1000:.0f} kHz"
+
+    def update_pga_display(self, gain_eff: float, bw_hz: float):
+        for c in range(2):
+            self.table.item(11, c).setText(self._fmt_gain(gain_eff))
+            self.table.item(12, c).setText(self._fmt_bw(bw_hz))
 
     def update_measurements(self, data: dict):
         """

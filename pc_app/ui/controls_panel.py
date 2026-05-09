@@ -55,6 +55,12 @@ class ControlsPanel(QDockWidget):
     # NEW: UI Hold (freeze display without stopping hardware)
     ui_hold_changed = pyqtSignal(bool)
     oversampling_changed = pyqtSignal(int)
+
+    # PGA
+    pga_enabled_changed = pyqtSignal(bool)
+    pga_step_changed = pyqtSignal(int)
+    pga_cal_requested = pyqtSignal()
+
     reload_requested = pyqtSignal()   # Reload App
 
     def __init__(self, title="Controls", parent=None):
@@ -351,7 +357,51 @@ class ControlsPanel(QDockWidget):
         
         self.layout.addWidget(grp_gen)
 
-        # --- 8. Theme + Reload ---
+        # --- 8. PGA ---
+        grp_pga = QGroupBox("PGA (CH1)")
+        l_pga = QVBoxLayout(grp_pga)
+
+        self.chk_pga_enable = QCheckBox("Enable PGA")
+        self.chk_pga_enable.setToolTip(
+            "Activa el amplificador de ganancia programable en CH1.\n"
+            "Permite medir senales de hasta ~30 Vpp con resolucion de mV."
+        )
+        l_pga.addWidget(self.chk_pga_enable)
+
+        row_pga_step = QHBoxLayout()
+        row_pga_step.addWidget(QLabel("Gain:"))
+        self.cb_pga_step = QComboBox()
+        pga_steps = [
+            ("x1.00 (paso 0)", 0),
+            ("x2.00 (paso 1)", 1),
+            ("x4.96 (paso 2)", 2),
+            ("x9.96 (paso 3)", 3),
+            ("x5.96 (paso 4)", 4),
+            ("x10.96 (paso 5)", 5),
+            ("x13.92 (paso 6)", 6),
+            ("x14.92 (paso 7)", 7),
+        ]
+        for label, val in pga_steps:
+            self.cb_pga_step.addItem(label, val)
+        self.cb_pga_step.setEnabled(False)
+        row_pga_step.addWidget(self.cb_pga_step)
+        l_pga.addLayout(row_pga_step)
+
+        self.lbl_pga_bw = QLabel("BW: -- Hz")
+        self.lbl_pga_bw.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+        l_pga.addWidget(self.lbl_pga_bw)
+
+        self.btn_pga_cal = QPushButton("Calibrate PGA...")
+        self.btn_pga_cal.setEnabled(False)
+        l_pga.addWidget(self.btn_pga_cal)
+
+        self.lbl_pga_status = QLabel("")
+        self.lbl_pga_status.setStyleSheet("color: #22c55e; font-size: 10px;")
+        l_pga.addWidget(self.lbl_pga_status)
+
+        self.layout.addWidget(grp_pga)
+
+        # --- 9. Theme + Reload ---
         grp_theme = QGroupBox("App")
         l_theme = QVBoxLayout(grp_theme)
 
@@ -413,6 +463,14 @@ class ControlsPanel(QDockWidget):
         self.chk_cursor_t.toggled.connect(self.time_cursors_toggled.emit)
         self.chk_cursor_v.toggled.connect(self.volt_cursors_toggled.emit)
 
+        # PGA
+        self.chk_pga_enable.toggled.connect(self.pga_enabled_changed.emit)
+        self.chk_pga_enable.toggled.connect(self.cb_pga_step.setEnabled)
+        self.chk_pga_enable.toggled.connect(self.btn_pga_cal.setEnabled)
+        self.cb_pga_step.currentIndexChanged.connect(
+            lambda i: self.pga_step_changed.emit(self.cb_pga_step.itemData(i)))
+        self.btn_pga_cal.clicked.connect(self.pga_cal_requested.emit)
+
         # Generator
         self.btn_gen_start.clicked.connect(self._on_gen_start)
         self.btn_gen_stop.clicked.connect(self._on_gen_stop)
@@ -449,6 +507,42 @@ class ControlsPanel(QDockWidget):
         fw = info.get('fw_version', 'Unknown')
         rate = info.get('max_rate_hz', 0)
         self.lbl_fw.setText(f"FW: {fw} (Max {rate//1000}kHz)")
+
+    def update_pga_info(self, info: dict):
+        step = info.get('step', 0)
+        gains = info.get('gain_eff', [1.0]*8)
+        bws = info.get('bw_hz', [1000000.0]*8)
+        enabled = info.get('enabled', False)
+        calibrated = info.get('calibrated', False)
+
+        self.cb_pga_step.blockSignals(True)
+        for i in range(8):
+            label = f"x{gains[i]:.2f} (paso {i})"
+            bw_warn = " ⚠" if bws[i] < 150000 else ""
+            self.cb_pga_step.setItemText(i, label + bw_warn)
+        self.cb_pga_step.setCurrentIndex(step)
+        self.cb_pga_step.blockSignals(False)
+
+        current_bw = bws[step] if step < len(bws) else 0
+        bw_text = f"BW: {current_bw/1000:.0f} kHz"
+        if current_bw < 150000:
+            self.lbl_pga_bw.setStyleSheet("color: #eab308; font-size: 10px;")
+            bw_text += " (limitado, >75kHz atenuado)"
+        else:
+            self.lbl_pga_bw.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+        self.lbl_pga_bw.setText(bw_text)
+
+        self.chk_pga_enable.blockSignals(True)
+        self.chk_pga_enable.setChecked(enabled)
+        self.chk_pga_enable.blockSignals(False)
+        self.cb_pga_step.setEnabled(enabled)
+        self.btn_pga_cal.setEnabled(enabled)
+
+        if calibrated:
+            self.lbl_pga_status.setText("Calibrado")
+        elif enabled:
+            self.lbl_pga_status.setText("Sin calibrar — use Calibrate")
+            self.lbl_pga_status.setStyleSheet("color: #eab308; font-size: 10px;")
 
     def on_connection_changed(self, connected: bool):
         self.btn_connect.setChecked(connected)

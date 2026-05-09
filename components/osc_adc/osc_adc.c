@@ -39,6 +39,8 @@ static uint8_t s_current_atten[2] = {3, 3};
 #define OSC_ADC_CORRECTION_FACTOR 1.037f // Ajuste para 12dB (3.268V / 3.15V)
 #define OSC_ADC_SATURATION_MV                                                  \
   2500 // Punto donde empieza la corrección no-lineal
+#define OSC_ADC_CLIP_MIN_MV10 1500       // 150.0 mV * 10 — límite inferior rango lineal
+#define OSC_ADC_CLIP_MAX_MV10 27500      // 2750.0 mV * 10 — límite superior rango lineal
 
 /* Estado del filtro y decimación — se inicializa/resetea en osc_adc_start() */
 static int32_t s_acc_ch0 = 0;
@@ -299,7 +301,17 @@ static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx) {
     voltage_mv = (int)(voltage_mv * OSC_ADC_CORRECTION_FACTOR);
   }
 
-  return (int16_t)(voltage_mv * 10);
+  int16_t mv10 = (int16_t)(voltage_mv * 10);
+
+  if (mv10 < OSC_ADC_CLIP_MIN_MV10) {
+      s_overflow_count++;
+      mv10 = OSC_ADC_CLIP_MIN_MV10;
+  } else if (mv10 > OSC_ADC_CLIP_MAX_MV10) {
+      s_overflow_count++;
+      mv10 = OSC_ADC_CLIP_MAX_MV10;
+  }
+
+  return mv10;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -389,6 +401,44 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
 }
 
 /* -------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms)
+{
+    if (!s_adc_handle) return 14500;
+    if (ch_idx > 1) ch_idx = 0;
+
+    uint8_t target_ch = (ch_idx == 0) ? 0 : 1;
+    int64_t sum = 0;
+    size_t count = 0;
+    uint32_t elapsed = 0;
+    uint32_t step_ms = (timeout_ms < 10) ? timeout_ms : 10;
+
+    while (elapsed < timeout_ms) {
+        uint32_t bytes_read = 0;
+        uint8_t tmp[4096];
+        esp_err_t ret = adc_continuous_read(s_adc_handle, tmp, sizeof(tmp),
+                                            &bytes_read, pdMS_TO_TICKS(step_ms));
+        elapsed += step_ms;
+        if (ret != ESP_OK || bytes_read == 0) continue;
+
+        size_t n = bytes_read / SOC_ADC_DIGI_RESULT_BYTES;
+        for (size_t i = 0; i < n; i++) {
+            adc_digi_output_data_t *p =
+                (adc_digi_output_data_t *)&tmp[i * SOC_ADC_DIGI_RESULT_BYTES];
+            if (p->type2.channel == target_ch) {
+                sum += p->type2.data;
+                count++;
+            }
+        }
+        if (count >= 256) break;
+    }
+
+    if (count == 0) return 14500;
+
+    uint16_t avg_raw = (uint16_t)(sum / count);
+    return raw_to_mv10(avg_raw, ch_idx);
+}
+
 void *osc_adc_get_handle(void) { return s_adc_handle; }
 uint32_t osc_adc_get_overflow_count(void) { return s_overflow_count; }
 void osc_adc_reset_overflow_count(void) { s_overflow_count = 0; }

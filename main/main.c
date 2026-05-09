@@ -36,6 +36,7 @@
 #include "osc_usb.h"
 #include "osc_protocol.h"
 #include "osc_gen.h"
+#include "osc_pga.h"
 
 static const char *TAG = "osc_main";
 
@@ -102,6 +103,16 @@ static void led_init(void)
 }
 
 static void led_set(bool on) { gpio_set_level(PIN_LED_STATUS, on ? 1 : 0); }
+
+/* --------------------------------------------------------------------------
+ * Helper para auto-calibración del PGA.
+ * Lee ADC promediando 256 muestras de CH0 y devuelve media en mV*10.
+ * -------------------------------------------------------------------------- */
+int16_t osc_pga_read_adc_mean(void)
+{
+    int16_t mean = osc_adc_read_mean_mv10(0, 100);
+    return mean;
+}
 
 /* --------------------------------------------------------------------------
  * TAREA: ADC_CAPTURE (Core 1, máxima prioridad)
@@ -221,6 +232,13 @@ static void dsp_process_task(void *arg)
         // ¿Tenemos un frame completo?
         if (frame_fill < cfg.frame_size) continue;
 
+        // Descartar frame si hubo cambio de ganancia PGA durante la captura
+        if (g_pga_gain_changed) {
+            g_pga_gain_changed = false;
+            frame_fill = 0;
+            continue;
+        }
+
         // --- Trigger evaluation ---
         osc_trigger_apply_config();
         osc_trigger_result_t trig_result;
@@ -298,6 +316,7 @@ void app_main(void)
 
     // --- Inicializar módulos (en orden de dependencia) ---
     ESP_ERROR_CHECK(osc_config_init());
+    ESP_ERROR_CHECK(osc_pga_init());     // PGA debe iniciar antes que ADC
     ESP_ERROR_CHECK(osc_adc_init());
     ESP_ERROR_CHECK(osc_dsp_init());
 

@@ -197,8 +197,12 @@ class WaveformWidget(QWidget):
         self._last_dt_us = 10.0  # Deterministic fallback for delta
 
         # PGA
-        self.ch1_pga_gain = 1.0
-        self.ch2_pga_gain = 1.0
+        self._pga_enabled = False
+        self._pga_step = 0
+        self._pga_vg_mv = 1600.0
+        self._pga_gain_eff = 1.0
+        self._pga_offset_mv = 0.0
+        self._pga_div_ratio = 100000.0 / (1000000.0 + 100000.0)  # 1/11
 
         # --- Calibrated grid lines (10 vertical × 8 horizontal) ---
         self._grid_lines_x = []
@@ -456,17 +460,21 @@ class WaveformWidget(QWidget):
     # PGA
     # ==================================================================
 
-    def set_pga_gain(self, channel: int, gain: float):
-        if channel == 0:
-            self.ch1_pga_gain = gain
-        else:
-            self.ch2_pga_gain = gain
+    def set_pga_params(self, enabled: bool, step: int, vg_mv: float,
+                       gain_eff: float, offset_mv: float):
+        self._pga_enabled = enabled
+        self._pga_step = step
+        self._pga_vg_mv = vg_mv
+        self._pga_gain_eff = gain_eff
+        self._pga_offset_mv = offset_mv
 
-    def _apply_pga(self, mv: np.ndarray, channel: int) -> np.ndarray:
-        gain = self.ch1_pga_gain if channel == 0 else self.ch2_pga_gain
-        if gain != 1.0 and gain > 0:
-            return mv / gain
-        return mv
+    def _pga_adc_to_input_mv(self, mv: np.ndarray, channel: int) -> np.ndarray:
+        if channel != 0 or not self._pga_enabled:
+            return mv
+        g = self._pga_gain_eff
+        if g <= 0:
+            return mv
+        return (mv - self._pga_vg_mv - self._pga_offset_mv) / g / self._pga_div_ratio
 
     # ==================================================================
     # Rendering
@@ -492,7 +500,7 @@ class WaveformWidget(QWidget):
 
         # 3. CH1
         if self.ch1_visible and ch1_mv is not None and len(t_aligned) > 0:
-            data1 = self._apply_pga(ch1_mv, 0) + self.ch1_offset_mv
+            data1 = self._pga_adc_to_input_mv(ch1_mv, 0) + self.ch1_offset_mv
             pts_per_div = self.timebase_us / (1000000.0 / sample_rate_hz)
             if pts_per_div < 50 and len(t_aligned) >= 4:
                 factor = int(50 / pts_per_div) + 1
@@ -508,7 +516,7 @@ class WaveformWidget(QWidget):
         # 4. CH2 (scaled relative to CH1 for visual independence)
         if self.ch2_visible and ch2_mv is not None and len(t_aligned) > 0:
             factor_escala = self.ch1_scale_mv / self.ch2_scale_mv
-            data2 = (self._apply_pga(ch2_mv, 1) * factor_escala) + self.ch2_offset_mv
+            data2 = (self._pga_adc_to_input_mv(ch2_mv, 1) * factor_escala) + self.ch2_offset_mv
             pts_per_div = self.timebase_us / (1000000.0 / sample_rate_hz)
             if pts_per_div < 50 and len(t_aligned) >= 4:
                 factor = int(50 / pts_per_div) + 1
@@ -548,10 +556,10 @@ class WaveformWidget(QWidget):
             self._roll_t_us = np.append(self._roll_t_us, abs_t)
 
             if ch1_mv is not None:
-                d1 = self._apply_pga(ch1_mv, 0) + self.ch1_offset_mv
+                d1 = self._pga_adc_to_input_mv(ch1_mv, 0) + self.ch1_offset_mv
                 self._roll_ch1 = np.append(self._roll_ch1, d1)
             if ch2_mv is not None:
-                d2 = self._apply_pga(ch2_mv, 1) + self.ch2_offset_mv
+                d2 = self._pga_adc_to_input_mv(ch2_mv, 1) + self.ch2_offset_mv
                 self._roll_ch2 = np.append(self._roll_ch2, d2)
 
             # Trim to max points
@@ -600,15 +608,15 @@ class WaveformWidget(QWidget):
         t_real_us = t_us * (1000000.0 / sample_rate_hz)
         
         if self.ch1_visible and ch1_min is not None and ch1_max is not None:
-            lo = self._apply_pga(ch1_min, 0) + self.ch1_offset_mv
-            hi = self._apply_pga(ch1_max, 0) + self.ch1_offset_mv
+            lo = self._pga_adc_to_input_mv(ch1_min, 0) + self.ch1_offset_mv
+            hi = self._pga_adc_to_input_mv(ch1_max, 0) + self.ch1_offset_mv
             self._env_ch1_lo.setData(t_real_us, lo)
             self._env_ch1_hi.setData(t_real_us, hi)
         if self.ch2_visible and ch2_min is not None and ch2_max is not None:
             # Aplicar factor de escala relativo al CH2 para el sobre
             factor = self.ch1_scale_mv / self.ch2_scale_mv
-            lo = (self._apply_pga(ch2_min, 1) * factor) + self.ch2_offset_mv
-            hi = (self._apply_pga(ch2_max, 1) * factor) + self.ch2_offset_mv
+            lo = (self._pga_adc_to_input_mv(ch2_min, 1) * factor) + self.ch2_offset_mv
+            hi = (self._pga_adc_to_input_mv(ch2_max, 1) * factor) + self.ch2_offset_mv
             self._env_ch2_lo.setData(t_real_us, lo)
             self._env_ch2_hi.setData(t_real_us, hi)
 
@@ -637,10 +645,10 @@ class WaveformWidget(QWidget):
                     t_aligned = t_real
 
                 if self.ch1_visible and ch1 is not None:
-                    data = self._apply_pga(ch1, 0) + self.ch1_offset_mv
+                    data = self._pga_adc_to_input_mv(ch1, 0) + self.ch1_offset_mv
                     self.persistence_curves_ch1[i].setData(t_aligned, data)
                 if self.ch2_visible and ch2 is not None:
-                    data = (self._apply_pga(ch2, 1) * factor) + self.ch2_offset_mv
+                    data = (self._pga_adc_to_input_mv(ch2, 1) * factor) + self.ch2_offset_mv
                     self.persistence_curves_ch2[i].setData(t_aligned, data)
 
     # ==================================================================

@@ -4,6 +4,7 @@
 #include "osc_adc.h"
 #include "osc_dsp.h"
 #include "osc_gen.h"
+#include "osc_pga.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -261,6 +262,98 @@ static void process_command(const char *cmd)
         return;
     }
 
+    // CMD_PGA_SET_STEP <step>
+    if (strncmp(cmd, OSC_CMD_PGA_SET_STEP, strlen(OSC_CMD_PGA_SET_STEP)) == 0) {
+        int step = -1;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_SET_STEP), " %d", &step) == 1
+            && step >= 0 && step < 8) {
+            esp_err_t r = osc_pga_set_step((uint8_t)step);
+            if (r == ESP_OK) osc_usb_send_ack(cmd);
+            else             osc_usb_send_nak(cmd, "set_step failed");
+        } else {
+            osc_usb_send_nak(cmd, "bad step (0-7)");
+        }
+        return;
+    }
+
+    // CMD_PGA_CAL_START
+    if (strcmp(cmd, OSC_CMD_PGA_CAL_START) == 0) {
+        extern int16_t osc_pga_read_adc_mean(void);
+        esp_err_t r = osc_pga_calibrate_auto(osc_pga_read_adc_mean);
+        if (r == ESP_OK) {
+            osc_pga_cal_save();
+            osc_usb_send_ack(cmd);
+            osc_usb_send_pga_info();
+        } else {
+            osc_usb_send_nak(cmd, "cal failed");
+        }
+        return;
+    }
+
+    // CMD_PGA_CAL_SET_VG <mv>
+    if (strncmp(cmd, OSC_CMD_PGA_CAL_SET_VG, strlen(OSC_CMD_PGA_CAL_SET_VG)) == 0) {
+        float mv = 0;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_CAL_SET_VG), " %f", &mv) == 1) {
+            esp_err_t r = osc_pga_cal_set_vg(mv);
+            if (r == ESP_OK) osc_usb_send_ack(cmd);
+            else             osc_usb_send_nak(cmd, "vg out of range");
+        } else {
+            osc_usb_send_nak(cmd, "bad vg value");
+        }
+        return;
+    }
+
+    // CMD_PGA_CAL_SET_GAIN <step> <factor>
+    if (strncmp(cmd, OSC_CMD_PGA_CAL_SET_GAIN, strlen(OSC_CMD_PGA_CAL_SET_GAIN)) == 0) {
+        int s = -1; float f = 0;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_CAL_SET_GAIN), " %d %f", &s, &f) == 2
+            && s >= 0 && s < 8) {
+            esp_err_t r = osc_pga_cal_set_gain_factor((uint8_t)s, f);
+            if (r == ESP_OK) osc_usb_send_ack(cmd);
+            else             osc_usb_send_nak(cmd, "bad factor");
+        } else {
+            osc_usb_send_nak(cmd, "bad args");
+        }
+        return;
+    }
+
+    // CMD_PGA_CAL_SET_OFF <step> <offset_mv>
+    if (strncmp(cmd, OSC_CMD_PGA_CAL_SET_OFF, strlen(OSC_CMD_PGA_CAL_SET_OFF)) == 0) {
+        int s = -1; float off = 0;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_CAL_SET_OFF), " %d %f", &s, &off) == 2
+            && s >= 0 && s < 8) {
+            esp_err_t r = osc_pga_cal_set_offset((uint8_t)s, off);
+            if (r == ESP_OK) osc_usb_send_ack(cmd);
+            else             osc_usb_send_nak(cmd, "bad step");
+        } else {
+            osc_usb_send_nak(cmd, "bad args");
+        }
+        return;
+    }
+
+    // CMD_PGA_CAL_SAVE
+    if (strcmp(cmd, OSC_CMD_PGA_CAL_SAVE) == 0) {
+        esp_err_t r = osc_pga_cal_save();
+        if (r == ESP_OK) osc_usb_send_ack(cmd);
+        else             osc_usb_send_nak(cmd, "nvs write failed");
+        return;
+    }
+
+    // CMD_PGA_CAL_RESET
+    if (strcmp(cmd, OSC_CMD_PGA_CAL_RESET) == 0) {
+        osc_pga_cal_reset();
+        osc_usb_send_ack(cmd);
+        osc_usb_send_pga_info();
+        return;
+    }
+
+    // CMD_PGA_GET_INFO
+    if (strcmp(cmd, OSC_CMD_PGA_GET_INFO) == 0) {
+        osc_usb_send_ack(cmd);
+        osc_usb_send_pga_info();
+        return;
+    }
+
     osc_usb_send_nak(cmd, "comando desconocido");
 }
 
@@ -411,6 +504,55 @@ static esp_err_t usb_write_raw(const uint8_t *buf, size_t len)
     return (total_sent == len) ? ESP_OK : ESP_FAIL;
 }
 
+/* --------------------------------------------------------------------------
+ * Frame PGA_INFO (0x08)
+ * -------------------------------------------------------------------------- */
+esp_err_t osc_usb_send_pga_info(void)
+{
+    uint8_t buf[110];
+    size_t  pos = 0;
+
+    buf[pos++] = OSC_PROTO_SYNC1;
+    buf[pos++] = OSC_PROTO_SYNC2;
+    buf[pos++] = OSC_FRAME_PGA_INFO;
+    buf[pos++] = osc_pga_get_step();
+
+    float vg = osc_pga_get_vg_mv();
+    memcpy(&buf[pos], &vg, 4); pos += 4;
+
+    osc_pga_cal_t cal;
+    osc_pga_cal_get(&cal);
+    buf[pos++] = cal.calibrated ? 1 : 0;
+
+    osc_config_t cfg;
+    osc_config_get(&cfg);
+    buf[pos++] = cfg.pga_enabled ? 1 : 0;
+
+    for (int s = 0; s < 8; s++) {
+        osc_pga_step_t info;
+        osc_pga_get_step_info(s, &info);
+        float g = info.gain_effective * cal.gain_cal_factor[s];
+        memcpy(&buf[pos], &g, 4); pos += 4;
+    }
+
+    for (int s = 0; s < 8; s++) {
+        memcpy(&buf[pos], &cal.offset_cal_mv[s], 4); pos += 4;
+    }
+
+    for (int s = 0; s < 8; s++) {
+        osc_pga_step_t info;
+        osc_pga_get_step_info(s, &info);
+        memcpy(&buf[pos], &info.bw_hz, 4); pos += 4;
+    }
+
+    buf[pos] = crc8(buf, pos); pos++;
+
+    xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
+    esp_err_t ret = usb_write_raw(buf, pos);
+    xSemaphoreGive(s_tx_mutex);
+    return ret;
+}
+
 esp_err_t osc_usb_send_data_frame(const osc_frame_t *frame)
 {
     if (!frame || !frame->ch0_data) return ESP_ERR_INVALID_ARG;
@@ -450,7 +592,8 @@ esp_err_t osc_usb_send_info(void)
     memcpy(&buf[pos], &max_frame, 2); pos += 2;
 
     uint16_t caps = OSC_CAP_DUAL_CHANNEL | OSC_CAP_FFT |
-                    OSC_CAP_OVERSAMPLE   | OSC_CAP_CLOCK_HACK;
+                    OSC_CAP_OVERSAMPLE   | OSC_CAP_CLOCK_HACK |
+                    OSC_CAP_PGA;
     memcpy(&buf[pos], &caps, 2); pos += 2;
 
     const char *fw_str = "ESP32S3-OSC v1.0";

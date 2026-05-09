@@ -66,6 +66,21 @@ class OscConfig:
     ch1_coupling: str = "AC+DC"
     streaming: bool = False
     oversampling: int = 1
+    pga_step: int = 0
+    pga_enabled: bool = False
+    pga_vg_mv: float = 1600.0
+    pga_calibrated: bool = False
+    pga_gain_eff: list = None
+    pga_offset_cal: list = None
+    pga_bw_hz: list = None
+
+    def __post_init__(self):
+        if self.pga_gain_eff is None:
+            self.pga_gain_eff = [1.0] * 8
+        if self.pga_offset_cal is None:
+            self.pga_offset_cal = [0.0] * 8
+        if self.pga_bw_hz is None:
+            self.pga_bw_hz = [1000000.0] * 8
 
 class _ConfigPushWorker(QObject):
     """Worker que corre en hilo separado para evitar bloquear la UI."""
@@ -89,6 +104,7 @@ class DeviceController(QObject):
     y mantiene el estado conocido del dispositivo.
     """
     config_changed = pyqtSignal()
+    pga_info_received = pyqtSignal(dict)
 
     def __init__(self, reader: SerialReader, parent=None) -> None:
         super().__init__(parent)
@@ -111,6 +127,7 @@ class DeviceController(QObject):
         self.reader.ack_received.connect(self._on_ack)
         self.reader.nak_received.connect(self._on_nak)
         self.reader.connection_changed.connect(self._on_connection_changed)
+        self.reader.pga_info_received.connect(self._on_pga_info)
 
     # ------------------------------------------------------------------
     # Conexion / desconexion
@@ -164,6 +181,18 @@ class DeviceController(QObject):
             self.port_name = ""
 
 
+
+    def _on_pga_info(self, info: dict) -> None:
+        cfg = self.current_config
+        cfg.pga_step = info.get('step', 0)
+        cfg.pga_vg_mv = info.get('vg_mv', 1600.0)
+        cfg.pga_calibrated = info.get('calibrated', False)
+        cfg.pga_enabled = info.get('enabled', False)
+        cfg.pga_gain_eff = info.get('gain_eff', [1.0]*8)
+        cfg.pga_offset_cal = info.get('offset_cal', [0.0]*8)
+        cfg.pga_bw_hz = info.get('bw_hz', [1000000.0]*8)
+        self.pga_info_received.emit(info)
+        self.config_changed.emit()
 
     # --- Continúa métodos de DeviceController ---
 
@@ -463,6 +492,44 @@ class DeviceController(QObject):
 
     def get_status(self) -> bool:
         return self._send_command("CMD_GET_STATUS")[0]
+
+    # --- PGA Commands ---
+    def set_pga_step(self, step: int) -> bool:
+        if step < 0 or step > 7:
+            raise ValueError(f"PGA step invalido: {step}. Rango: 0-7")
+        ok, err = self._send_command(f"CMD_PGA_SET_STEP {step}")
+        if ok:
+            self.current_config.pga_step = step
+            self.config_changed.emit()
+        return ok
+
+    def pga_get_info(self) -> bool:
+        ok, _ = self._send_command("CMD_PGA_GET_INFO")
+        return ok
+
+    def pga_cal_start(self) -> bool:
+        ok, _ = self._send_command("CMD_PGA_CAL_START")
+        return ok
+
+    def pga_cal_set_vg(self, vg_mv: float) -> bool:
+        ok, err = self._send_command(f"CMD_PGA_CAL_SET_VG {vg_mv:.1f}")
+        return ok
+
+    def pga_cal_set_gain(self, step: int, factor: float) -> bool:
+        ok, err = self._send_command(f"CMD_PGA_CAL_SET_GAIN {step} {factor:.4f}")
+        return ok
+
+    def pga_cal_set_offset(self, step: int, offset_mv: float) -> bool:
+        ok, err = self._send_command(f"CMD_PGA_CAL_SET_OFF {step} {offset_mv:.1f}")
+        return ok
+
+    def pga_cal_save(self) -> bool:
+        ok, _ = self._send_command("CMD_PGA_CAL_SAVE")
+        return ok
+
+    def pga_cal_reset(self) -> bool:
+        ok, _ = self._send_command("CMD_PGA_CAL_RESET")
+        return ok
 
     # --- Signal Generator ---
     def set_gen_start(self, wave_type: int, freq_hz: int, duty_pct: int) -> bool:

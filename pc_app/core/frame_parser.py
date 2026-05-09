@@ -54,6 +54,7 @@ FRAME_ACK          = 0x03
 FRAME_NAK          = 0x04
 FRAME_INFO         = 0x05
 FRAME_FFT          = 0x06
+FRAME_PGA_INFO     = 0x08
 
 SYNC = b'\xAA\x55'
 
@@ -159,6 +160,8 @@ class FrameParser:
             return self._parse_nak()
         elif frame_type == FRAME_INFO:
             return self._parse_info()
+        elif frame_type == FRAME_PGA_INFO:
+            return self._parse_pga_info()
         elif frame_type == FRAME_FFT:
             return self._parse_fft()
         else:
@@ -403,4 +406,32 @@ class FrameParser:
             'bin_hz':           bin_hz,
             'freqs':            freqs,
             'magnitudes_mv':    mags,
+        }
+
+    def _parse_pga_info(self) -> Optional[dict]:
+        TOTAL = 107
+        raw = self._check_and_consume(TOTAL)
+        if raw is None:
+            return None
+        if raw is False:
+            return False
+
+        step       = raw[3]
+        vg_mv      = struct.unpack_from('<f', raw, 4)[0]
+        calibrated = bool(raw[8])
+        enabled    = bool(raw[9])
+
+        gain_eff = [struct.unpack_from('<f', raw, 10 + i*4)[0] for i in range(8)]
+        offset_cal = [struct.unpack_from('<f', raw, 42 + i*4)[0] for i in range(8)]
+        bw_hz     = [struct.unpack_from('<f', raw, 74 + i*4)[0] for i in range(8)]
+
+        return {
+            'type':       FRAME_PGA_INFO,
+            'step':       step,
+            'vg_mv':      vg_mv,
+            'calibrated': calibrated,
+            'enabled':    enabled,
+            'gain_eff':   gain_eff,
+            'offset_cal': offset_cal,
+            'bw_hz':      bw_hz,
         }

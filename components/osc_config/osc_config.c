@@ -8,7 +8,7 @@
 
 static const char *TAG = "osc_config";
 #define NVS_NAMESPACE  "osc_cfg"
-#define NVS_KEY_CONFIG "config_v1"
+#define NVS_KEY_CONFIG "config_v2"
 
 static SemaphoreHandle_t s_mutex    = NULL;
 static osc_config_t      s_config;
@@ -158,6 +158,33 @@ esp_err_t osc_config_set_oversample(uint8_t factor)
         return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_config.oversample_factor = factor;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+esp_err_t osc_config_set_pga_step(uint8_t step)
+{
+    if (step > 7) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.pga_step = step;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+esp_err_t osc_config_set_pga_enabled(bool en)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.pga_enabled = en;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+esp_err_t osc_config_set_pga_vg(float vg_mv)
+{
+    if (vg_mv < 100.0f || vg_mv > 3000.0f) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.pga_vg_mv = vg_mv;
     xSemaphoreGive(s_mutex);
     return ESP_OK;
 }
