@@ -194,7 +194,10 @@ class ControlsPanel(QDockWidget):
                 self.cb_timebase.addItem(f"{t/1000:.0f} ms/div", float(t))
             else:
                 self.cb_timebase.addItem(f"{t} us/div", float(t))
-        self.cb_timebase.setCurrentText("1000 us/div")  # 1 ms/div default
+        # Default: 1 ms/div = 1000.0 us — find by data value, NOT text
+        default_idx = self.cb_timebase.findData(1000.0)
+        if default_idx >= 0:
+            self.cb_timebase.setCurrentIndex(default_idx)
         self.cb_timebase.setToolTip("Escala temporal por division")
         row_tb.addWidget(self.cb_timebase)
         l_acq.addLayout(row_tb)

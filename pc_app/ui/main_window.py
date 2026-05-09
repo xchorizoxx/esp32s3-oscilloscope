@@ -177,6 +177,7 @@ class MainWindow(QMainWindow):
 
         # NUEVO: Mediciones locales del MeasurementsEngine
         self.meas_engine.measurements_ready.connect(self.meas_panel.update_measurements)
+        self.meas_engine.measurements_ready.connect(self._on_measurements_update)
 
         # NUEVO: FFT controls
         self.fft_widget.window_changed.connect(self._on_fft_window_changed)
@@ -341,7 +342,6 @@ class MainWindow(QMainWindow):
         self.waveform_widget.plot_widget.setBackground(bg)
         self.waveform_widget.BG_COLOR = bg
         self.waveform_widget.GRID_MAJOR = grid_color
-        self.waveform_widget._draw_dynamic_grid()
 
         self.fft_widget.plot_widget.setBackground(bg)
         self.xy_widget.plot_widget.setBackground(bg)
@@ -355,7 +355,7 @@ class MainWindow(QMainWindow):
             #             pass _overflow_count as overflow counter, not frames_crc_err
             self.status_bar.update_stats(stats['fps'], stats['bytes_per_sec'], self._overflow_count)
             cfg = self.controller.current_config
-            self.status_bar.update_rate(cfg.sample_rate // cfg.oversampling)
+            self.status_bar.update_rate(int(cfg.sample_rate / cfg.oversampling))
 
         # NUEVO: Si ui_hold esta activo, NO renderizar datos nuevos
         if self._ui_hold:
@@ -448,3 +448,14 @@ class MainWindow(QMainWindow):
 
     def is_ui_hold(self) -> bool:
         return self._ui_hold
+
+    # ------------------------------------------------------------------
+    # Measurement overlay on waveform
+    # ------------------------------------------------------------------
+
+    def _on_measurements_update(self, data: dict):
+        """Pipe measurement results to the waveform overlay."""
+        self.waveform_widget.update_overlay(
+            ch0_meas=data.get('ch0'),
+            ch1_meas=data.get('ch1')
+        )

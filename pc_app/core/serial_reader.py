@@ -20,7 +20,6 @@ class SerialReader(QThread):
 
     # Senales para comunicarse con la UI (Data frame se pasa directo a DataStore)
     measurements_received = pyqtSignal(dict)
-    measurements_received = pyqtSignal(dict)
     info_received         = pyqtSignal(dict)
     ack_received          = pyqtSignal(str)
     nak_received          = pyqtSignal(str, str)

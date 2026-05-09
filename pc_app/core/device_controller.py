@@ -52,7 +52,7 @@ _EDGE_FW_TO_UI = {3: 0, 0: 1, 1: 2, 2: 3}
 @dataclass
 class OscConfig:
     """Configuracion local que refleja (lo mejor posible) el estado del firmware."""
-    mode: int = 1              # 0=single, 1=dual, 2=oversample
+    mode: int = 2              # 0=Single CH1, 1=Single CH2, 2=Dual
     sample_rate: int = 100000
     frame_size: int = 1024
     fft_enabled: int = 0
@@ -225,9 +225,9 @@ class DeviceController(QObject):
             return
         # Nota: asumiendo que push_atten_to_device usa sleeps similares
         # Si no los tiene aún, se pueden añadir aquí.
-        self._send_command(f"CMD_SET_ATTEN 0 {self.current_config.ch1_atten}", wait_ack=True)
+        self._send_command(f"CMD_SET_ATTEN 0 {self.current_config.ch0_atten_idx}", wait_ack=True)
         time.sleep(0.05)
-        self._send_command(f"CMD_SET_ATTEN 1 {self.current_config.ch2_atten}", wait_ack=True)
+        self._send_command(f"CMD_SET_ATTEN 1 {self.current_config.ch1_atten_idx}", wait_ack=True)
 
     def push_atten_to_device(self) -> None:
         """Despacha el push de atenuación a un hilo worker."""

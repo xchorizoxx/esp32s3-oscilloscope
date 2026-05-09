@@ -43,33 +43,53 @@ class SimulatedSource:
 
     def _generate_frame(self):
         dt = 1.0 / self.sample_rate
-        t = np.arange(self.frame_size, dtype=np.float64) * dt + self.t_offset
-        self.t_offset += self.frame_size * dt
+        # Generate 2x samples to have room for centering the trigger
+        gen_size = self.frame_size * 2
+        t = np.arange(gen_size, dtype=np.float64) * dt + self.t_offset
+        self.t_offset += self.frame_size * dt  # Advance by one frame worth
 
         # CH1: Senoidal con offset
-        ch0_mv = self.ch1_amp * np.sin(2 * np.pi * self.ch1_freq * t) + 200.0
+        ch0_raw = self.ch1_amp * np.sin(2 * np.pi * self.ch1_freq * t) + 200.0
         # CH2: Cuadrada con offset
-        ch1_mv = self.ch2_amp * np.sign(np.sin(2 * np.pi * self.ch2_freq * t)) - 100.0
+        ch1_raw = self.ch2_amp * np.sign(np.sin(2 * np.pi * self.ch2_freq * t)) - 100.0
 
         # Ruido base
-        ch0_mv += np.random.normal(0, 10, self.frame_size)
-        ch1_mv += np.random.normal(0, 10, self.frame_size)
+        ch0_raw += np.random.normal(0, 10, gen_size)
+        ch1_raw += np.random.normal(0, 10, gen_size)
 
         # Trigger estable con histéresis (Schmitt Trigger)
-        trigger_idx = 0
+        raw_trigger_idx = gen_size // 4  # fallback: 25% of gen buffer
         lvl = 200.0
-        hyst = 50.0  # Banda de guarda
+        hyst = 50.0
         armed = False
-        
-        trig_src = ch0_mv
-        for i in range(1, len(trig_src)):
-            # Armar cuando cae por debajo de lvl - hyst
-            if not armed and trig_src[i] < (lvl - hyst):
+
+        for i in range(1, len(ch0_raw)):
+            if not armed and ch0_raw[i] < (lvl - hyst):
                 armed = True
-            # Disparar cuando cruza lvl estando armado
-            if armed and trig_src[i] >= lvl:
-                trigger_idx = i
+            if armed and ch0_raw[i] >= lvl:
+                raw_trigger_idx = i
                 break
+
+        # --- Pre-trigger centering (like a real oscilloscope) ---
+        # Extract frame_size samples centered on the trigger point
+        half = self.frame_size // 2
+        start = raw_trigger_idx - half
+        end = start + self.frame_size
+
+        # Clamp to valid range
+        if start < 0:
+            start = 0
+            end = self.frame_size
+        if end > gen_size:
+            end = gen_size
+            start = end - self.frame_size
+
+        ch0_mv = ch0_raw[start:end]
+        ch1_mv = ch1_raw[start:end]
+        trigger_idx = raw_trigger_idx - start  # Trigger position within the extracted frame
+
+        # Time axis as sample indices (converted to real us in the widget)
+        time_axis_us = np.arange(self.frame_size, dtype=np.float64)
 
         frame = {
             'type': FRAME_DATA,
@@ -84,6 +104,7 @@ class SimulatedSource:
             'trigger_index': trigger_idx,
             'ch0_mv': ch0_mv.astype(np.float32),
             'ch1_mv': ch1_mv.astype(np.float32),
+            'time_axis_us': time_axis_us,
         }
 
         self.data_store.push(frame)

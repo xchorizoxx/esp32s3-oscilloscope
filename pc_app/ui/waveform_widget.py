@@ -50,10 +50,10 @@ class WaveformWidget(QWidget):
         self.plot_item.getAxis('bottom').setStyle(showValues=False)
         self.plot_item.getAxis('left').setStyle(showValues=False)
         
-        # Encender el grid nativo acelerado por hardware
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        # Disable native grid — we draw our own calibrated 10×8 grid
+        self.plot_widget.showGrid(x=False, y=False)
 
-        # Deshabilitar AutoRange en X para estabilidad total (el usuario controla el zoom)
+        # Disable AutoRange on X for total stability
         self.plot_item.enableAutoRange(axis='x', enable=False)
         self.plot_item.getViewBox().setMouseEnabled(x=True, y=True)
 
@@ -199,6 +199,31 @@ class WaveformWidget(QWidget):
         self.ch1_pga_gain = 1.0
         self.ch2_pga_gain = 1.0
 
+        # --- Calibrated grid lines (10 vertical × 8 horizontal) ---
+        self._grid_lines_x = []
+        self._grid_lines_y = []
+        grid_pen = pg.mkPen(self.GRID_MAJOR, width=0.5)
+        center_pen = pg.mkPen(self.GRID_MAJOR, width=1.2)  # Thicker center cross
+        for i in range(11):  # 11 lines for 10 divisions
+            pen = center_pen if i == 5 else grid_pen
+            line = pg.InfiniteLine(pos=0, angle=90, pen=pen, movable=False)
+            self.plot_item.addItem(line)
+            self._grid_lines_x.append(line)
+        for j in range(9):   # 9 lines for 8 divisions
+            pen = center_pen if j == 4 else grid_pen
+            line = pg.InfiniteLine(pos=0, angle=0, pen=pen, movable=False)
+            self.plot_item.addItem(line)
+            self._grid_lines_y.append(line)
+
+        # --- Measurement overlay (TextItems on the waveform) ---
+        overlay_font = QFont('Inter', 10, QFont.Weight.Bold)
+        self._overlay_ch1 = pg.TextItem('', color=self.CH1_COLOR, anchor=(0, 1))
+        self._overlay_ch2 = pg.TextItem('', color=self.CH2_COLOR, anchor=(1, 1))
+        self._overlay_tdiv = pg.TextItem('', color='#a1a1aa', anchor=(0.5, 0))
+        for item in [self._overlay_ch1, self._overlay_ch2, self._overlay_tdiv]:
+            item.setFont(overlay_font)
+            self.plot_item.addItem(item)
+
         self._update_ranges()
 
     # ==================================================================
@@ -305,20 +330,69 @@ class WaveformWidget(QWidget):
     # ==================================================================
 
     def _update_ranges(self):
-        # Eje Y: 8 divisiones fijas
+        """Update Y axis range and reposition calibrated grid lines."""
         n_y_divs = 8
         y_max = (n_y_divs / 2) * self.ch1_scale_mv
         self.plot_item.setYRange(-y_max, y_max, padding=0)
+
+        # Position Y grid lines at V/div intervals
+        for j, line in enumerate(self._grid_lines_y):
+            y_pos = -y_max + j * (2 * y_max / 8)
+            line.setPos(y_pos)
+
+    def _update_grid_x(self, x_min: float, x_max: float):
+        """Position X grid lines at calibrated T/div intervals."""
+        span = x_max - x_min
+        step = span / 10.0
+        for i, line in enumerate(self._grid_lines_x):
+            line.setPos(x_min + i * step)
+
+        # Update overlay positions (anchored to view corners)
+        self._overlay_ch1.setPos(x_min, -4 * self.ch1_scale_mv)
+        self._overlay_ch2.setPos(x_max, -4 * self.ch1_scale_mv)
+        self._overlay_tdiv.setPos((x_min + x_max) / 2, 4 * self.ch1_scale_mv)
+
+    def update_overlay(self, ch0_meas: dict = None, ch1_meas: dict = None):
+        """Update the measurement overlay on the waveform canvas.
         
-        # Eje X: 10 divisiones fijas centradas en el trigger (t=0)
-        # Esto garantiza que la onda NO se mueva de su sitio.
-        n_x_divs = 10
-        x_half = (n_x_divs / 2) * self.timebase_us
-        self.plot_item.setXRange(-x_half, x_half, padding=0)
+        Args:
+            ch0_meas: dict with 'freq_hz', 'vpp_mv' for CH1
+            ch1_meas: dict with 'freq_hz', 'vpp_mv' for CH2
+        """
+        def fmt_freq(f):
+            if f <= 0: return "-- Hz"
+            return f"{f:.0f} Hz" if f < 1000 else f"{f/1000:.1f} kHz"
+
+        def fmt_v(v):
+            return f"{v:.0f} mV" if abs(v) < 1000 else f"{v/1000:.2f} V"
+
+        if ch0_meas and ch0_meas.get('valid'):
+            freq = fmt_freq(ch0_meas.get('freq_hz', 0))
+            vpp = fmt_v(ch0_meas.get('vpp_mv', 0))
+            self._overlay_ch1.setText(f"CH1  {freq}  {vpp}  {self.ch1_scale_mv:.0f}mV/div")
+        else:
+            self._overlay_ch1.setText("CH1  --")
+
+        if ch1_meas and ch1_meas.get('valid'):
+            freq = fmt_freq(ch1_meas.get('freq_hz', 0))
+            vpp = fmt_v(ch1_meas.get('vpp_mv', 0))
+            self._overlay_ch2.setText(f"CH2  {freq}  {vpp}  {self.ch2_scale_mv:.0f}mV/div")
+        else:
+            self._overlay_ch2.setText("CH2  --")
+
+        # T/div display
+        t = self.timebase_us
+        if t >= 1000:
+            self._overlay_tdiv.setText(f"{t/1000:.0f} ms/div")
+        else:
+            self._overlay_tdiv.setText(f"{t:.0f} µs/div")
 
     def set_timebase(self, us_per_div: float):
         self.timebase_us = us_per_div
-        self._update_ranges()
+
+    def set_auto_timebase(self, enabled: bool):
+        """Reserved for future use."""
+        pass
 
     def set_voltage_scale(self, mv_per_div: float, channel: int):
         if channel == 0:
@@ -394,15 +468,18 @@ class WaveformWidget(QWidget):
     # ==================================================================
 
     def update_frame(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray, trigger_index: int = 0, sample_rate_hz: float = 100000.0):
-        """Render a waveform frame with real-time conversion and proportional scaling."""
+        """Render a waveform frame. This is the SOLE controller of the X axis range."""
         if self.roll_mode:
             self._update_roll(t_us, ch1_mv, ch2_mv)
             return
 
-        # 1. Convertir índices a microsegundos reales
+        if len(t_us) == 0:
+            return
+
+        # 1. Convert sample indices to real microseconds
         t_real_us = t_us * (1000000.0 / sample_rate_hz)
 
-        # 2. Alinear con el trigger
+        # 2. Align to trigger (t=0 at trigger point)
         if len(t_real_us) > trigger_index >= 0:
             t_aligned = t_real_us - t_real_us[trigger_index]
         else:
@@ -415,13 +492,22 @@ class WaveformWidget(QWidget):
         else:
             self.curve_ch1.setData([], [])
 
-        # 4. CH2 (Escalado relativo al CH1 para independencia visual)
+        # 4. CH2 (scaled relative to CH1 for visual independence)
         if self.ch2_visible and ch2_mv is not None:
             factor_escala = self.ch1_scale_mv / self.ch2_scale_mv
             data2 = (self._apply_pga(ch2_mv, 1) * factor_escala) + self.ch2_offset_mv
             self.curve_ch2.setData(t_aligned, data2)
         else:
             self.curve_ch2.setData([], [])
+
+        # 5. X RANGE — the ONLY place that sets it.
+        #    Use exact data boundaries. No padding, no rounding.
+        x_min = float(t_aligned[0])
+        x_max = float(t_aligned[-1])
+        self.plot_item.setXRange(x_min, x_max, padding=0)
+
+        # 6. Update calibrated grid line positions
+        self._update_grid_x(x_min, x_max)
 
     def _update_roll(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray):
         """Roll mode: append new data and scroll the view."""
