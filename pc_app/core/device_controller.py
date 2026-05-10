@@ -63,11 +63,19 @@ class OscConfig:
     oversampling: int = 1
     pga_step: int = 0
     pga_enabled: bool = False
-    pga_vg_mv: float = 1600.0
+    pga_vg_mv: float = 1450.0
     pga_calibrated: bool = False
     pga_gain_eff: list = None
     pga_offset_cal: list = None
     pga_bw_hz: list = None
+    # PGA v2 fields
+    pga_gain_nominal: list = None
+    pga_gain_cal_factor: list = None
+    pga_div_ratio: float = 100000.0 / (1000000.0 + 100000.0)
+    pga_r_fb_ohm: float = 36000.0
+    pga_r_nom_ohm: list = None
+    pga_gpio_ron_ohm: float = 50.0
+    pga_vg_default: float = 1450.0
 
     def __post_init__(self):
         if self.pga_gain_eff is None:
@@ -76,6 +84,12 @@ class OscConfig:
             self.pga_offset_cal = [0.0] * 8
         if self.pga_bw_hz is None:
             self.pga_bw_hz = [1000000.0] * 8
+        if self.pga_gain_nominal is None:
+            self.pga_gain_nominal = [1.0] * 8
+        if self.pga_gain_cal_factor is None:
+            self.pga_gain_cal_factor = [1.0] * 8
+        if self.pga_r_nom_ohm is None:
+            self.pga_r_nom_ohm = [36000.0, 9090.0, 4020.0]
 
 class _ConfigPushWorker(QObject):
     """Worker que corre en hilo separado para evitar bloquear la UI."""
@@ -179,12 +193,26 @@ class DeviceController(QObject):
     def _on_pga_info(self, info: dict) -> None:
         cfg = self.current_config
         cfg.pga_step = info.get('step', 0)
-        cfg.pga_vg_mv = info.get('vg_mv', 1600.0)
+        cfg.pga_vg_mv = info.get('vg_mv', 1450.0)
         cfg.pga_calibrated = info.get('calibrated', False)
         cfg.pga_enabled = info.get('enabled', False)
-        cfg.pga_gain_eff = info.get('gain_eff', [1.0]*8)
+
+        gain_nominal = info.get('gain_nominal', [1.0]*8)
+        gain_cal_factor = info.get('gain_cal_factor', [1.0]*8)
         cfg.pga_offset_cal = info.get('offset_cal', [0.0]*8)
         cfg.pga_bw_hz = info.get('bw_hz', [1000000.0]*8)
+
+        # Compute effective gain from nominal * cal factor
+        cfg.pga_gain_eff = [n * c for n, c in zip(gain_nominal, gain_cal_factor)]
+        cfg.pga_gain_nominal = gain_nominal
+        cfg.pga_gain_cal_factor = gain_cal_factor
+
+        cfg.pga_div_ratio = info.get('div_ratio', 100000.0 / (1000000.0 + 100000.0))
+        cfg.pga_r_fb_ohm = info.get('r_fb_ohm', 36000.0)
+        cfg.pga_r_nom_ohm = info.get('r_nom_ohm', [36000.0, 9090.0, 4020.0])
+        cfg.pga_gpio_ron_ohm = info.get('gpio_ron_ohm', 50.0)
+        cfg.pga_vg_default = info.get('vg_default', 1450.0)
+
         self.pga_info_received.emit(info)
         self.config_changed.emit()
 
@@ -493,6 +521,23 @@ class DeviceController(QObject):
 
     def pga_cal_reset(self) -> bool:
         ok, _ = self._send_command("CMD_PGA_CAL_RESET")
+        return ok
+
+    def pga_set_hardware(self, div_ratio: float, rf: float,
+                         r1: float, r2: float, r3: float, ron: float) -> bool:
+        ok, err = self._send_command(
+            f"CMD_PGA_SET_HARDWARE {div_ratio:.6f} {rf:.1f} {r1:.1f} {r2:.1f} {r3:.1f} {ron:.1f}")
+        return ok
+
+    def pga_set_vg_default(self, vg_mv: float) -> bool:
+        ok, err = self._send_command(f"CMD_PGA_SET_DEFAULT_VG {vg_mv:.1f}")
+        return ok
+
+    def set_pga_enabled(self, enabled: bool) -> bool:
+        ok, err = self._send_command(f"CMD_PGA_SET_ENABLED {1 if enabled else 0}")
+        if ok:
+            self.current_config.pga_enabled = enabled
+            self.config_changed.emit()
         return ok
 
     # --- Signal Generator ---

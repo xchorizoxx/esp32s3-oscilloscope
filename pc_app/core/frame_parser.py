@@ -409,7 +409,7 @@ class FrameParser:
         }
 
     def _parse_pga_info(self) -> Optional[dict]:
-        TOTAL = 107
+        TOTAL = 167
         raw = self._check_and_consume(TOTAL)
         if raw is None:
             return None
@@ -421,17 +421,29 @@ class FrameParser:
         calibrated = bool(raw[8])
         enabled    = bool(raw[9])
 
-        gain_eff = [struct.unpack_from('<f', raw, 10 + i*4)[0] for i in range(8)]
-        offset_cal = [struct.unpack_from('<f', raw, 42 + i*4)[0] for i in range(8)]
-        bw_hz     = [struct.unpack_from('<f', raw, 74 + i*4)[0] for i in range(8)]
+        gain_nominal    = [struct.unpack_from('<f', raw, 10 + i*4)[0] for i in range(8)]
+        gain_cal_factor = [struct.unpack_from('<f', raw, 42 + i*4)[0] for i in range(8)]
+        offset_cal      = [struct.unpack_from('<f', raw, 74 + i*4)[0] for i in range(8)]
+        bw_hz           = [struct.unpack_from('<f', raw, 106 + i*4)[0] for i in range(8)]
+        div_ratio       = struct.unpack_from('<f', raw, 138)[0]
+        r_fb_ohm        = struct.unpack_from('<f', raw, 142)[0]
+        r_nom_ohm       = [struct.unpack_from('<f', raw, 146 + i*4)[0] for i in range(3)]
+        gpio_ron_ohm    = struct.unpack_from('<f', raw, 158)[0]
+        vg_default      = struct.unpack_from('<f', raw, 162)[0]
 
         return {
-            'type':       FRAME_PGA_INFO,
-            'step':       step,
-            'vg_mv':      vg_mv,
-            'calibrated': calibrated,
-            'enabled':    enabled,
-            'gain_eff':   gain_eff,
-            'offset_cal': offset_cal,
-            'bw_hz':      bw_hz,
+            'type':            FRAME_PGA_INFO,
+            'step':            step,
+            'vg_mv':           vg_mv,
+            'calibrated':      calibrated,
+            'enabled':         enabled,
+            'gain_nominal':    gain_nominal,
+            'gain_cal_factor': gain_cal_factor,
+            'offset_cal':      offset_cal,
+            'bw_hz':           bw_hz,
+            'div_ratio':       div_ratio,
+            'r_fb_ohm':        r_fb_ohm,
+            'r_nom_ohm':       r_nom_ohm,
+            'gpio_ron_ohm':    gpio_ron_ohm,
+            'vg_default':      vg_default,
         }

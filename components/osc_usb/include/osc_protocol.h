@@ -41,53 +41,6 @@ extern "C" {
 #define OSC_FLAG_OVERFLOW (1 << 3)
 #define OSC_FLAG_FFT_ATTACHED (1 << 4) ///< frame de FFT sigue inmediatamente
 
-/* =========================================================================
- * Layouts de frames
- * =========================================================================
- *
- * DATA FRAME (FRAME_TYPE = 0x01):
- * ┌────────┬────────┬────────────┬─────────┬──────────────┬────────────────┬─────────────────┬─────┐
- * │ 0xAA   │ 0x55   │ FRAME_TYPE │  FLAGS  │  SEQ_NUM     │ SAMPLE_COUNT   │
- * TIMESTAMP_US    │ ... │ │ 1 byte │ 1 byte │  1 byte    │ 1 byte  │  2 bytes
- * LE  │  2 bytes LE    │  4 bytes LE     │     │
- * ├────────┴────────┴────────────┴─────────┴──────────────┴────────────────┴─────────────────┤
- * │ │ TRIGGER_INDEX (4 bytes LE) │ CH0_DATA (SAMPLE_COUNT * 2 bytes, int16 LE,
- * mV*10)          │     │
- * ├────────────────────────────┴─────────────────────────────────────────────────────────────┤
- * │ │ [CH1_DATA (SAMPLE_COUNT * 2 bytes, int16 LE) si CH1_VALID=1] │     │
- * ├──────────────────────────────────────────────────────────────────────────────────────────┤
- * │ │ CRC8 (1 byte) — calculado sobre TODOS los bytes anteriores incluyendo
- * sync               │     │
- * └──────────────────────────────────────────────────────────────────────────────────────────┴─────┘
- *
- * Total header fijo: 2(sync) + 1(type) + 1(flags) + 2(seq) + 2(count) + 4(ts) +
- * 4(trig_idx) = 16 bytes
- *
- * MEASUREMENTS FRAME (FRAME_TYPE = 0x02):
- * ┌───────┬───────┬──────┬───────┬────────────────────────────────────────────────────────────┐
- * │ 0xAA  │ 0x55  │ 0x02 │ FLAGS │ CH0: vpp(4) vrms(4) vdc(4) vac_rms(4)
- * vmax(4) vmin(4)      │ │       │       │      │       │      freq(4)
- * period(4) duty(4) rise(4) fall(4) valid(1)    │ │       │       │      │ │
- * CH1: mismos campos que CH0 (si CH1_VALID=1)                │ │       │ │ │ │
- * CRC8 (1 byte)                                              │
- * └───────┴───────┴──────┴───────┴────────────────────────────────────────────────────────────┘
- * Total: 2+1+1 + 45 (ch0) + 45 (ch1, opcional) + 1 = 50 o 95 bytes
- *
- * INFO FRAME (FRAME_TYPE = 0x05):
- * ┌────────────────────────────────────────────────────────────────┐
- * │ 0xAA 0x55 0x05 VERSION_MAJOR VERSION_MINOR MAX_RATE_HZ(4)      │
- * │ MAX_FRAME_SIZE(2) CAPS_FLAGS(2) FW_STRING(32 bytes null-term)  │
- * │ CRC8                                                           │
- * └────────────────────────────────────────────────────────────────┘
- *
- * FFT FRAME (FRAME_TYPE = 0x06):
- * ┌────────────────────────────────────────────────────────────────┐
- * │ 0xAA 0x55 0x06 FLAGS SEQ(2) FFT_POINTS(2) BIN_HZ_x100(4)       │
- * │ MAGNITUDES_MV (FFT_POINTS/2 * 4 bytes float32 LE)              │
- * │ CRC8                                                           │
- * └────────────────────────────────────────────────────────────────┘
- * ========================================================================= */
-
 // Capacidades del firmware (bits de CAPS_FLAGS en INFO frame)
 #define OSC_CAP_DUAL_CHANNEL (1 << 0)
 #define OSC_CAP_FFT (1 << 1)
@@ -100,8 +53,6 @@ extern "C" {
 #define OSC_FW_VERSION_MINOR 0
 
 // Máximo tamaño de un frame de datos (para dimensionar buffers)
-// 16 (header) + 2*4096*2 (dual 4096 samples) + FFT_HEADER(6) + 512*4 (FFT float) + 1 (CRC) = 18455 bytes
-// Redondeamos a múltiplo de 16 para alineación de caché.
 #define OSC_MAX_FRAME_BYTES 20480
 
 /* =========================================================================
@@ -112,13 +63,13 @@ extern "C" {
  * CMD_STREAM_START               → ACK + inicio del stream de DATA frames
  * CMD_STREAM_STOP                → ACK + detención del stream
  * CMD_SINGLE_SHOT                → ACK + espera trigger + 1 DATA frame
- * CMD_SET_MODE <mode>            → ACK (mode: 0=SINGLE_CH 1=DUAL_CH
- * 2=OVERSAMPLE) CMD_SET_RATE <hz>              → ACK (hz: 611..160000)
- * CMD_SET_TRIG <ch> <mv> <edge>  → ACK (ch: 0/1, mv: flotante, edge: 0=RISE
- * 1=FALL 2=ANY 3=NONE) CMD_SET_ATTEN <ch> <db>        → ACK (ch: 0/1, db:
- * 0/1/2/3 = 0/2.5/6/12 dB) CMD_SET_FRAME <n>              → ACK (n:
- * 64/128/256/512/1024/2048/4096) CMD_SET_PRE_TRIG <n>           → ACK (n:
- * 0..frame_size/2) CMD_SET_FFT <en>               → ACK (en: 0=off 1=on)
+ * CMD_SET_MODE <mode>            → ACK (mode: 0=SINGLE_CH 1=DUAL_CH 2=OVERSAMPLE)
+ * CMD_SET_RATE <hz>              → ACK (hz: 611..160000)
+ * CMD_SET_TRIG <ch> <mv> <edge>  → ACK (ch: 0/1, mv: flotante, edge: 0=RISE 1=FALL 2=ANY 3=NONE)
+ * CMD_SET_ATTEN <ch> <db>        → ACK (ch: 0/1, db: 0/1/2/3 = 0/2.5/6/12 dB)
+ * CMD_SET_FRAME <n>              → ACK (n: 64/128/256/512/1024/2048/4096)
+ * CMD_SET_PRE_TRIG <n>           → ACK (n: 0..frame_size/2)
+ * CMD_SET_FFT <en>               → ACK (en: 0=off 1=on)
  * CMD_FACTORY_RESET              → ACK
  * CMD_GET_STATUS                 → MEASUREMENTS frame con estado actual
  * ========================================================================= */
@@ -149,14 +100,17 @@ extern "C" {
 #define OSC_CMD_GEN_STOP  "CMD_GEN_STOP"   ///< -> ACK
 
 /* --- Comandos PGA (Programable Gain Amplifier) --- */
-#define OSC_CMD_PGA_SET_STEP     "CMD_PGA_SET_STEP"    ///< <0-7> -> ACK
-#define OSC_CMD_PGA_CAL_START    "CMD_PGA_CAL_START"   ///< -> ACK (inicia auto-cal)
-#define OSC_CMD_PGA_CAL_SET_VG   "CMD_PGA_CAL_SET_VG"  ///< <mv_float> -> ACK
-#define OSC_CMD_PGA_CAL_SET_GAIN "CMD_PGA_CAL_SET_GAIN" ///< <step> <factor_float> -> ACK
-#define OSC_CMD_PGA_CAL_SET_OFF  "CMD_PGA_CAL_SET_OFF"  ///< <step> <offset_mv_float> -> ACK
-#define OSC_CMD_PGA_CAL_SAVE     "CMD_PGA_CAL_SAVE"    ///< -> ACK
-#define OSC_CMD_PGA_CAL_RESET    "CMD_PGA_CAL_RESET"   ///< -> ACK (reset a defaults)
-#define OSC_CMD_PGA_GET_INFO     "CMD_PGA_GET_INFO"    ///< -> PGA_INFO frame (type 0x08)
+#define OSC_CMD_PGA_SET_STEP        "CMD_PGA_SET_STEP"       ///< <0-7> -> ACK
+#define OSC_CMD_PGA_CAL_START       "CMD_PGA_CAL_START"      ///< -> ACK (inicia auto-cal)
+#define OSC_CMD_PGA_CAL_SET_VG      "CMD_PGA_CAL_SET_VG"     ///< <mv_float> -> ACK
+#define OSC_CMD_PGA_CAL_SET_GAIN    "CMD_PGA_CAL_SET_GAIN"   ///< <step> <factor_float> -> ACK
+#define OSC_CMD_PGA_CAL_SET_OFF     "CMD_PGA_CAL_SET_OFF"    ///< <step> <offset_mv_float> -> ACK
+#define OSC_CMD_PGA_CAL_SAVE        "CMD_PGA_CAL_SAVE"       ///< -> ACK
+#define OSC_CMD_PGA_CAL_RESET       "CMD_PGA_CAL_RESET"      ///< -> ACK (reset a defaults)
+#define OSC_CMD_PGA_GET_INFO        "CMD_PGA_GET_INFO"       ///< -> PGA_INFO frame (type 0x08)
+#define OSC_CMD_PGA_SET_HARDWARE    "CMD_PGA_SET_HARDWARE"   ///< <div_ratio> <rf> <r1> <r2> <r3> <ron> -> ACK
+#define OSC_CMD_PGA_SET_DEFAULT_VG  "CMD_PGA_SET_DEFAULT_VG" ///< <mv_float> -> ACK
+#define OSC_CMD_PGA_SET_ENABLED     "CMD_PGA_SET_ENABLED"    ///< <0|1> -> ACK
 
 #ifdef __cplusplus
 }

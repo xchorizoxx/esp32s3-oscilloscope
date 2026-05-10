@@ -276,27 +276,31 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_pga_info_received(self, info: dict):
-        self.controls_panel.update_pga_info(info)
-
         cfg = self.controller.current_config
-        step = info.get('step', 0)
-        enabled = info.get('enabled', False)
-        gains = info.get('gain_eff', [1.0]*8)
-        offsets = info.get('offset_cal', [0.0]*8)
-        vg = info.get('vg_mv', 1600.0)
+        self.controls_panel.update_pga_info({
+            'step': cfg.pga_step,
+            'gain_eff': cfg.pga_gain_eff,
+            'offset_cal': cfg.pga_offset_cal,
+            'bw_hz': cfg.pga_bw_hz,
+            'vg_mv': cfg.pga_vg_mv,
+            'calibrated': cfg.pga_calibrated,
+            'enabled': cfg.pga_enabled,
+        })
 
-        gain_eff = gains[step] if step < len(gains) else 1.0
-        offset = offsets[step] if step < len(offsets) else 0.0
-        self.waveform_widget.set_pga_params(enabled, step, vg, gain_eff, offset)
+        gain = cfg.pga_gain_eff[cfg.pga_step] if cfg.pga_step < len(cfg.pga_gain_eff) else 1.0
+        offset = cfg.pga_offset_cal[cfg.pga_step] if cfg.pga_step < len(cfg.pga_offset_cal) else 0.0
+        self.waveform_widget.set_pga_params(
+            enabled=cfg.pga_enabled, step=cfg.pga_step, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
 
-        bws = info.get('bw_hz', [1000000.0]*8)
-        bw = bws[step] if step < len(bws) else 1000000.0
-        self.meas_panel.update_pga_display(gain_eff, bw)
+        bw = cfg.pga_bw_hz[cfg.pga_step] if cfg.pga_step < len(cfg.pga_bw_hz) else 1000000.0
+        self.meas_panel.update_pga_display(gain, bw)
 
     def _on_pga_enabled_changed(self, enabled: bool):
         if not self.controller.connected:
             return
         self.controller.current_config.pga_enabled = enabled
+        self.controller.set_pga_enabled(enabled)
         self.controls_panel.cb_pga_step.setEnabled(enabled)
         self.controls_panel.btn_pga_cal.setEnabled(enabled)
         if enabled:
@@ -306,7 +310,23 @@ class MainWindow(QMainWindow):
         if not self.controller.connected:
             return
         self.controller.set_pga_step(step)
-        self.controller.pga_get_info()
+        cfg = self.controller.current_config
+        self.controls_panel.update_pga_info({
+            'step': step,
+            'gain_eff': cfg.pga_gain_eff,
+            'offset_cal': cfg.pga_offset_cal,
+            'bw_hz': cfg.pga_bw_hz,
+            'vg_mv': cfg.pga_vg_mv,
+            'calibrated': cfg.pga_calibrated,
+            'enabled': cfg.pga_enabled,
+        })
+        gain = cfg.pga_gain_eff[step] if step < len(cfg.pga_gain_eff) else 1.0
+        offset = cfg.pga_offset_cal[step] if step < len(cfg.pga_offset_cal) else 0.0
+        self.waveform_widget.set_pga_params(
+            enabled=cfg.pga_enabled, step=step, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        bw = cfg.pga_bw_hz[step] if step < len(cfg.pga_bw_hz) else 1000000.0
+        self.meas_panel.update_pga_display(gain, bw)
 
     def _on_pga_cal_requested(self):
         if not self.controller.connected:

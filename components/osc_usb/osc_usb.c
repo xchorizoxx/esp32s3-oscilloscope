@@ -360,6 +360,46 @@ static void process_command(const char *cmd)
         return;
     }
 
+    // CMD_PGA_SET_HARDWARE <div_ratio> <rf> <r1> <r2> <r3> <ron>
+    if (strncmp(cmd, OSC_CMD_PGA_SET_HARDWARE, strlen(OSC_CMD_PGA_SET_HARDWARE)) == 0) {
+        float dr=0, rf=0, r1=0, r2=0, r3=0, ron=0;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_SET_HARDWARE), " %f %f %f %f %f %f",
+                  &dr, &rf, &r1, &r2, &r3, &ron) == 6) {
+            esp_err_t r = osc_pga_cal_set_hardware(dr, rf, r1, r2, r3, ron);
+            if (r == ESP_OK) { osc_usb_send_ack(cmd); osc_usb_send_pga_info(); }
+            else             osc_usb_send_nak(cmd, "bad hardware config");
+        } else {
+            osc_usb_send_nak(cmd, "bad args (div rf r1 r2 r3 ron)");
+        }
+        return;
+    }
+
+    // CMD_PGA_SET_DEFAULT_VG <mv>
+    if (strncmp(cmd, OSC_CMD_PGA_SET_DEFAULT_VG, strlen(OSC_CMD_PGA_SET_DEFAULT_VG)) == 0) {
+        float mv = 0;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_SET_DEFAULT_VG), " %f", &mv) == 1) {
+            esp_err_t r = osc_pga_cal_set_vg_default(mv);
+            if (r == ESP_OK) osc_usb_send_ack(cmd);
+            else             osc_usb_send_nak(cmd, "vg default out of range");
+        } else {
+            osc_usb_send_nak(cmd, "bad vg value");
+        }
+        return;
+    }
+
+    // CMD_PGA_SET_ENABLED <0|1>
+    if (strncmp(cmd, OSC_CMD_PGA_SET_ENABLED, strlen(OSC_CMD_PGA_SET_ENABLED)) == 0) {
+        int en = -1;
+        if (sscanf(cmd + strlen(OSC_CMD_PGA_SET_ENABLED), " %d", &en) == 1
+            && (en == 0 || en == 1)) {
+            osc_config_set_pga_enabled(en != 0);
+            osc_usb_send_ack(cmd);
+        } else {
+            osc_usb_send_nak(cmd, "bad value (0 or 1)");
+        }
+        return;
+    }
+
     osc_usb_send_nak(cmd, "comando desconocido");
 }
 
@@ -515,7 +555,7 @@ static esp_err_t usb_write_raw(const uint8_t *buf, size_t len)
  * -------------------------------------------------------------------------- */
 esp_err_t osc_usb_send_pga_info(void)
 {
-    uint8_t buf[110];
+    uint8_t buf[170];
     size_t  pos = 0;
 
     buf[pos++] = OSC_PROTO_SYNC1;
@@ -534,11 +574,15 @@ esp_err_t osc_usb_send_pga_info(void)
     osc_config_get(&cfg);
     buf[pos++] = cfg.pga_enabled ? 1 : 0;
 
+    // gain_nominal[8], gain_cal_factor[8], offset_cal_mv[8], bw_hz[8]
     for (int s = 0; s < 8; s++) {
         osc_pga_step_t info;
         osc_pga_get_step_info(s, &info);
-        float g = info.gain_effective * cal.gain_cal_factor[s];
-        memcpy(&buf[pos], &g, 4); pos += 4;
+        memcpy(&buf[pos], &info.gain_nominal, 4); pos += 4;
+    }
+
+    for (int s = 0; s < 8; s++) {
+        memcpy(&buf[pos], &cal.gain_cal_factor[s], 4); pos += 4;
     }
 
     for (int s = 0; s < 8; s++) {
@@ -550,6 +594,15 @@ esp_err_t osc_usb_send_pga_info(void)
         osc_pga_get_step_info(s, &info);
         memcpy(&buf[pos], &info.bw_hz, 4); pos += 4;
     }
+
+    // Hardware topology
+    memcpy(&buf[pos], &cal.div_ratio, 4); pos += 4;
+    memcpy(&buf[pos], &cal.r_fb_ohm, 4); pos += 4;
+    memcpy(&buf[pos], &cal.r_nom_ohm[0], 4); pos += 4;
+    memcpy(&buf[pos], &cal.r_nom_ohm[1], 4); pos += 4;
+    memcpy(&buf[pos], &cal.r_nom_ohm[2], 4); pos += 4;
+    memcpy(&buf[pos], &cal.gpio_ron_ohm, 4); pos += 4;
+    memcpy(&buf[pos], &cal.vg_default, 4); pos += 4;
 
     buf[pos] = crc8(buf, pos); pos++;
 

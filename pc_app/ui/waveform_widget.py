@@ -461,12 +461,14 @@ class WaveformWidget(QWidget):
     # ==================================================================
 
     def set_pga_params(self, enabled: bool, step: int, vg_mv: float,
-                       gain_eff: float, offset_mv: float):
+                       gain_eff: float, offset_mv: float, div_ratio: float = None):
         self._pga_enabled = enabled
         self._pga_step = step
         self._pga_vg_mv = vg_mv
         self._pga_gain_eff = gain_eff
         self._pga_offset_mv = offset_mv
+        if div_ratio is not None:
+            self._pga_div_ratio = div_ratio
 
     def _pga_adc_to_input_mv(self, mv: np.ndarray, channel: int) -> np.ndarray:
         if channel != 0 or not self._pga_enabled:

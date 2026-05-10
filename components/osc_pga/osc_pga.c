@@ -25,12 +25,6 @@ static const gpio_num_t s_gpio[3] = {
     (gpio_num_t)OSC_PGA_GPIO_R3,
 };
 
-static const float s_r_nom[3] = {
-    (float)OSC_PGA_R1_OHM,
-    (float)OSC_PGA_R2_OHM,
-    (float)OSC_PGA_R3_OHM,
-};
-
 static uint8_t       s_current_step = 0;
 static osc_pga_cal_t s_cal;
 static bool          s_initialized  = false;
@@ -54,32 +48,35 @@ static float compute_gain_eff(uint8_t gpio_mask)
 {
     if (gpio_mask == 0) return 1.0f;
     float g_total = 0.0f;
+    float rf = s_cal.r_fb_ohm;
     for (int i = 0; i < 3; i++) {
         if (gpio_mask & (1 << i)) {
-            float rg_eff = s_r_nom[i] + (float)OSC_PGA_GPIO_RON_OHM;
+            float rg_eff = s_cal.r_nom_ohm[i] + s_cal.gpio_ron_ohm;
             g_total += 1.0f / rg_eff;
         }
     }
     float rg_parallel_eff = 1.0f / g_total;
-    return 1.0f + (float)OSC_PGA_RF_OHM / rg_parallel_eff;
+    return 1.0f + rf / rg_parallel_eff;
 }
 
 static float compute_gain_nom(uint8_t gpio_mask)
 {
     if (gpio_mask == 0) return 1.0f;
     float g_total = 0.0f;
+    float rf = s_cal.r_fb_ohm;
     for (int i = 0; i < 3; i++) {
         if (gpio_mask & (1 << i)) {
-            g_total += 1.0f / s_r_nom[i];
+            g_total += 1.0f / s_cal.r_nom_ohm[i];
         }
     }
     float rg_parallel = 1.0f / g_total;
-    return 1.0f + (float)OSC_PGA_RF_OHM / rg_parallel;
+    return 1.0f + rf / rg_parallel;
 }
 
 static void precompute_steps(void)
 {
     float vg         = s_cal.vg_mv;
+    float div        = s_cal.div_ratio;
     float swing_up   = (float)OSC_PGA_ADC_MAX_MV - vg;
     float swing_down = vg - (float)OSC_PGA_ADC_MIN_MV;
     float swing_sym  = (swing_up < swing_down) ? swing_up : swing_down;
@@ -93,9 +90,9 @@ static void precompute_steps(void)
         s_steps[s].gain_nominal   = gain_nom;
         s_steps[s].gain_effective = gain_eff;
         s_steps[s].bw_hz          = LM358_GBW_HZ / gain_eff;
-        s_steps[s].max_input_vpp  = vout_pp / gain_eff / OSC_PGA_DIV_RATIO;
+        s_steps[s].max_input_vpp  = vout_pp / gain_eff / div;
         float adc_lsb_mv = (float)(OSC_PGA_ADC_MAX_MV - OSC_PGA_ADC_MIN_MV) / 4096.0f;
-        s_steps[s].res_input_mv   = adc_lsb_mv / gain_eff / OSC_PGA_DIV_RATIO;
+        s_steps[s].res_input_mv   = adc_lsb_mv / gain_eff / div;
         s_steps[s].bw_warning     = (s_steps[s].bw_hz < BW_WARNING_HZ);
         s_steps[s].gpio_mask      = mask;
     }
@@ -112,8 +109,15 @@ esp_err_t osc_pga_init(void)
 {
     if (s_initialized) return ESP_OK;
 
-    s_cal.vg_mv      = OSC_PGA_VG_DEFAULT_MV;
-    s_cal.calibrated = false;
+    s_cal.vg_mv        = OSC_PGA_VG_DEFAULT_MV;
+    s_cal.calibrated   = false;
+    s_cal.div_ratio    = OSC_PGA_DIV_RATIO;
+    s_cal.r_fb_ohm     = (float)OSC_PGA_RF_OHM;
+    s_cal.r_nom_ohm[0] = (float)OSC_PGA_R1_OHM;
+    s_cal.r_nom_ohm[1] = (float)OSC_PGA_R2_OHM;
+    s_cal.r_nom_ohm[2] = (float)OSC_PGA_R3_OHM;
+    s_cal.gpio_ron_ohm = (float)OSC_PGA_GPIO_RON_OHM;
+    s_cal.vg_default   = OSC_PGA_VG_DEFAULT_MV;
     for (int i = 0; i < OSC_PGA_NUM_STEPS; i++) {
         s_cal.gain_cal_factor[i] = 1.0f;
         s_cal.offset_cal_mv[i]   = 0.0f;
@@ -150,9 +154,9 @@ esp_err_t osc_pga_init(void)
     apply_gpio_mask(s_step_gpio_mask[saved_step]);
 
     s_initialized = true;
-    ESP_LOGI(TAG, "PGA init OK — paso=%d gain_eff=%.3f BW=%.0f Hz VG=%.1f mV",
+    ESP_LOGI(TAG, "PGA init OK — paso=%d gain_eff=%.3f BW=%.0f Hz VG=%.1f mV div=%.4f",
              saved_step, s_steps[saved_step].gain_effective,
-             s_steps[saved_step].bw_hz, s_cal.vg_mv);
+             s_steps[saved_step].bw_hz, s_cal.vg_mv, s_cal.div_ratio);
 
     if (s_steps[saved_step].bw_warning) {
         ESP_LOGW(TAG, "BW < 150 kHz en paso %d — senales >75kHz pueden atenuarse", saved_step);
@@ -198,7 +202,9 @@ float osc_pga_get_gain_eff(void)
            * s_cal.gain_cal_factor[s_current_step];
 }
 
-float osc_pga_get_vg_mv(void) { return s_cal.vg_mv; }
+float osc_pga_get_vg_mv(void)        { return s_cal.vg_mv; }
+float osc_pga_get_vg_default(void)    { return s_cal.vg_default; }
+float osc_pga_get_div_ratio(void)    { return s_cal.div_ratio; }
 
 float osc_pga_adc_to_input_mv(int16_t adc_mv10)
 {
@@ -209,7 +215,7 @@ float osc_pga_adc_to_input_mv(int16_t adc_mv10)
 
     float v_in_mv = (v_adc_mv - s_cal.vg_mv - offset)
                     / gain_total
-                    / OSC_PGA_DIV_RATIO;
+                    / s_cal.div_ratio;
     return v_in_mv;
 }
 
@@ -222,7 +228,17 @@ esp_err_t osc_pga_calibrate_auto(int16_t (*read_adc_mv10_fn)(void))
     apply_gpio_mask(0);
     vTaskDelay(pdMS_TO_TICKS(25));
     int16_t raw_vg = read_adc_mv10_fn();
-    s_cal.vg_mv = (float)raw_vg / 10.0f;
+    float vg = (float)raw_vg / 10.0f;
+
+    if (vg < 500.0f || vg > 2500.0f) {
+        ESP_LOGE(TAG, "Auto-cal fallo: entrada debe estar a GND (VG=%.1f mV fuera de rango)", vg);
+        apply_gpio_mask(s_step_gpio_mask[s_current_step]);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_cal.vg_mv = vg;
+    osc_config_set_pga_vg(vg);
+
     s_cal.offset_cal_mv[0]  = 0.0f;
     s_cal.gain_cal_factor[0] = 1.0f;
 
@@ -256,6 +272,7 @@ esp_err_t osc_pga_cal_set_vg(float vg_mv)
 {
     if (vg_mv < 100.0f || vg_mv > 3000.0f) return ESP_ERR_INVALID_ARG;
     s_cal.vg_mv = vg_mv;
+    osc_config_set_pga_vg(vg_mv);
     precompute_steps();
     return ESP_OK;
 }
@@ -272,6 +289,37 @@ esp_err_t osc_pga_cal_set_offset(uint8_t step, float offset_mv)
 {
     if (step >= OSC_PGA_NUM_STEPS) return ESP_ERR_INVALID_ARG;
     s_cal.offset_cal_mv[step] = offset_mv;
+    return ESP_OK;
+}
+
+esp_err_t osc_pga_cal_set_hardware(float div_ratio, float rf_ohm,
+                                    float r1_ohm, float r2_ohm, float r3_ohm,
+                                    float ron_ohm)
+{
+    if (div_ratio < 0.01f || div_ratio > 1.0f) return ESP_ERR_INVALID_ARG;
+    if (rf_ohm  < 100.0f || rf_ohm  > 100000.0f) return ESP_ERR_INVALID_ARG;
+    if (r1_ohm  < 100.0f || r1_ohm  > 100000.0f) return ESP_ERR_INVALID_ARG;
+    if (r2_ohm  < 100.0f || r2_ohm  > 100000.0f) return ESP_ERR_INVALID_ARG;
+    if (r3_ohm  < 100.0f || r3_ohm  > 100000.0f) return ESP_ERR_INVALID_ARG;
+    if (ron_ohm < 0.0f   || ron_ohm > 500.0f)    return ESP_ERR_INVALID_ARG;
+
+    s_cal.div_ratio    = div_ratio;
+    s_cal.r_fb_ohm     = rf_ohm;
+    s_cal.r_nom_ohm[0] = r1_ohm;
+    s_cal.r_nom_ohm[1] = r2_ohm;
+    s_cal.r_nom_ohm[2] = r3_ohm;
+    s_cal.gpio_ron_ohm = ron_ohm;
+    precompute_steps();
+    ESP_LOGI(TAG, "PGA hardware config: div=%.4f Rf=%.0f R1=%.0f R2=%.0f R3=%.0f Ron=%.0f",
+             div_ratio, rf_ohm, r1_ohm, r2_ohm, r3_ohm, ron_ohm);
+    return ESP_OK;
+}
+
+esp_err_t osc_pga_cal_set_vg_default(float vg_mv)
+{
+    if (vg_mv < 100.0f || vg_mv > 3000.0f) return ESP_ERR_INVALID_ARG;
+    s_cal.vg_default = vg_mv;
+    ESP_LOGI(TAG, "VG default cambiado a %.1f mV", vg_mv);
     return ESP_OK;
 }
 
@@ -307,7 +355,7 @@ esp_err_t osc_pga_cal_load(void)
 
 esp_err_t osc_pga_cal_reset(void)
 {
-    s_cal.vg_mv      = OSC_PGA_VG_DEFAULT_MV;
+    s_cal.vg_mv      = s_cal.vg_default;
     s_cal.calibrated = false;
     for (int i = 0; i < OSC_PGA_NUM_STEPS; i++) {
         s_cal.gain_cal_factor[i] = 1.0f;

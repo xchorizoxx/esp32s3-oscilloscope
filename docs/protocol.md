@@ -34,6 +34,7 @@ All binary frames share a common prefix:
 | `0x05` | INFO | ESP32 → PC | Device capabilities |
 | `0x06` | FFT | ESP32 → PC | FFT magnitude data |
 | `0x07` | HEARTBEAT | ESP32 → PC | 1 Hz keep-alive |
+| `0x08` | PGA_INFO | ESP32 → PC | PGA calibration and hardware info |
 
 ---
 
@@ -253,4 +254,96 @@ def crc8(data: bytes) -> int:
     for b in data:
         crc = CRC8_TABLE[crc ^ b]
     return crc
+```
+
+---
+
+## PGA Commands
+
+The PGA (Programmable Gain Amplifier) uses a 3-bit binary-weighted Rg ladder with open-drain GPIOs switching resistors R1=36kΩ, R2=9.09kΩ, R3=4.02kΩ. Gain is `1 + Rf/Rg_parallel` with Rf=36kΩ. An input voltage divider (100kΩ/1MΩ = 0.090909) sits before the op-amp non-inverting input.
+
+**All hardware parameters (divider ratio, resistor values, GPIO Ron) are configurable via USB commands and persisted in NVS.**
+
+### Frame Types
+
+| Byte | Name | Direction | Description |
+|------|------|-----------|-------------|
+| `0x08` | PGA_INFO | ESP32 → PC | PGA calibration and hardware info |
+
+### PGA_INFO Frame (`0x08`)
+
+167 bytes total. Sent in response to `CMD_PGA_GET_INFO` and after `CMD_PGA_CAL_START`, `CMD_PGA_SET_HARDWARE`, `CMD_PGA_CAL_RESET`.
+
+```
+Offset  Size  Field
+──────  ────  ─────────────────────────────────────────────────────────
+0       1     SYNC1 = 0xAA
+1       1     SYNC2 = 0x55
+2       1     FRAME_TYPE = 0x08
+3       1     STEP (uint8, 0-7, current gain step)
+
+4       4     VG_MV (float32 LE, measured virtual ground in mV)
+8       1     CALIBRATED (uint8, 0=not cal, 1=calibrated)
+9       1     ENABLED (uint8, 0=PGA disabled via UI, 1=enabled)
+
+10      32    GAIN_NOMINAL[8] (8 × float32 LE, ideal gain from resistors)
+42      32    GAIN_CAL_FACTOR[8] (8 × float32 LE, per-step trim near 1.0)
+74      32    OFFSET_CAL_MV[8] (8 × float32 LE, per-step DC offset)
+106     32    BW_HZ[8] (8 × float32 LE, bandwidth per step)
+
+138     4     DIV_RATIO (float32 LE, input divider ratio)
+142     4     R_FB_OHM (float32 LE, Rf feedback resistor value in Ω)
+146     4     R_NOM_OHM[0] (float32 LE, R1 value in Ω)
+150     4     R_NOM_OHM[1] (float32 LE, R2 value in Ω)
+154     4     R_NOM_OHM[2] (float32 LE, R3 value in Ω)
+158     4     GPIO_RON_OHM (float32 LE, GPIO on-resistance in Ω)
+162     4     VG_DEFAULT_MV (float32 LE, stored default VG for factory reset)
+166     1     CRC8
+```
+
+**Voltage reconstruction formula (both firmware and PC app):**
+```
+v_input_mv = (v_adc_mv - VG - offset_cal[step]) / (gain_nominal[step] * gain_cal_factor[step]) / div_ratio
+```
+
+### PGA Command Table
+
+| Command | Arguments | Response | Description |
+|---------|-----------|----------|-------------|
+| `CMD_PGA_SET_STEP` | `<0-7>` | ACK | Select gain step (applies GPIO mask) |
+| `CMD_PGA_CAL_START` | — | ACK + PGA_INFO | Auto-calibration: measure VG and offsets. Input must be grounded. |
+| `CMD_PGA_CAL_SET_VG` | `<mv_float>` | ACK | Set virtual ground manually (100-3000 mV) |
+| `CMD_PGA_CAL_SET_GAIN` | `<step> <factor_float>` | ACK | Set per-step gain trim factor (0.5-2.0, near 1.0) |
+| `CMD_PGA_CAL_SET_OFF` | `<step> <offset_mv_float>` | ACK | Set per-step offset correction (-500 to +500 mV) |
+| `CMD_PGA_CAL_SAVE` | — | ACK | Persist all calibration to NVS |
+| `CMD_PGA_CAL_RESET` | — | ACK + PGA_INFO | Reset calibration to defaults (VG→vg_default, trims→1.0, offsets→0) |
+| `CMD_PGA_GET_INFO` | — | ACK + PGA_INFO | Query full PGA status |
+| `CMD_PGA_SET_HARDWARE` | `<div_ratio> <rf> <r1> <r2> <r3> <ron>` | ACK + PGA_INFO | Set all hardware topology parameters. div_ratio 0.01-1.0, resistors 100-100000 Ω, ron 0-500 Ω. |
+| `CMD_PGA_SET_DEFAULT_VG` | `<mv_float>` | ACK | Persist VG default (used by CMD_PGA_CAL_RESET) |
+| `CMD_PGA_SET_ENABLED` | `<0\|1>` | ACK | Enable/disable PGA flag in config (does not affect hardware) |
+
+### CMD_PGA_SET_HARDWARE Example
+
+```
+CMD_PGA_SET_HARDWARE 0.090909 36000 36000 9090 4020 50
+```
+
+This sets the factory-default topology:
+- Divider ratio = 0.090909 (100k / 1.1M)
+- Rf = 36000 Ω
+- R1 = 36000 Ω (bit 0)
+- R2 = 9090 Ω (bit 1)
+- R3 = 4020 Ω (bit 2)
+- GPIO Ron = 50 Ω
+
+### Auto-Calibration Sequence
+
+1. Ground the BNC input (0V)
+2. Send `CMD_PGA_CAL_START`
+3. Firmware sets step 0 (gain=1), measures VG
+4. Firmware iterates steps 1-7, measures DC offset at each gain
+5. All gain trim factors remain at 1.0
+6. On success: saves to NVS, sends PGA_INFO
+7. On fault (VG outside 500-2500mV range): NAK with failure reason
+
 ```
