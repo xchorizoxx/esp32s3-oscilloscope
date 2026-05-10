@@ -10,19 +10,14 @@ Mejoras:
 """
 
 import threading
-import time
 import logging
 from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 import serial.tools.list_ports
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QThread
 from .serial_reader import SerialReader
-
-# Configurar logging para que los mensajes sean visibles en la consola
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-)
 
 # ---------------------------------------------------------------------------
 # Validacion — limites del protocolo y del ESP32-S3
@@ -174,7 +169,6 @@ class DeviceController(QObject):
         self.connected = connected
         if connected and not was_connected:
             # Sincronizar estado al conectar
-            QTimer = __import__('PyQt6.QtCore', fromlist=['QTimer']).QTimer
             QTimer.singleShot(500, self._sync_state_on_connect)
         if not connected:
             self.firmware_version = "Unknown"
@@ -206,9 +200,7 @@ class DeviceController(QObject):
         self.config_changed.emit()
 
     def _push_config_blocking(self) -> None:
-        """
-        Lógica de push secuencial con sleeps — corre en hilo worker.
-        """
+        """Push secuencial con ACK — corre en hilo worker."""
         if not self.connected:
             return
 
@@ -217,8 +209,6 @@ class DeviceController(QObject):
 
         if was_streaming:
             self._send_command("CMD_STREAM_STOP", wait_ack=True)
-
-        time.sleep(0.15)
 
         self._send_command(f"CMD_SET_MODE {cfg.mode}",        wait_ack=True)
         self._send_command(f"CMD_SET_RATE {cfg.sample_rate}", wait_ack=True)
@@ -232,12 +222,13 @@ class DeviceController(QObject):
         )
 
         if was_streaming:
-            time.sleep(0.05)
             self._send_command("CMD_STREAM_START", wait_ack=True)
 
     def push_config_to_device(self) -> None:
         """Despacha el push a un hilo worker para no bloquear la UI."""
         if not self.connected:
+            return
+        if hasattr(self, '_push_thread') and self._push_thread.isRunning():
             return
         self._push_thread = QThread()
         self._push_worker = _ConfigPushWorker(self, mode="config")
@@ -252,15 +243,14 @@ class DeviceController(QObject):
         """Push de atenuación en hilo worker."""
         if not self.connected:
             return
-        # Nota: asumiendo que push_atten_to_device usa sleeps similares
-        # Si no los tiene aún, se pueden añadir aquí.
         self._send_command(f"CMD_SET_ATTEN 0 {self.current_config.ch0_atten_idx}", wait_ack=True)
-        time.sleep(0.05)
         self._send_command(f"CMD_SET_ATTEN 1 {self.current_config.ch1_atten_idx}", wait_ack=True)
 
     def push_atten_to_device(self) -> None:
         """Despacha el push de atenuación a un hilo worker."""
         if not self.connected:
+            return
+        if hasattr(self, '_atten_thread') and self._atten_thread.isRunning():
             return
         self._atten_thread = QThread()
         self._atten_worker = _ConfigPushWorker(self, mode="atten")
@@ -336,7 +326,7 @@ class DeviceController(QObject):
         prev = self.current_config.mode
         self.current_config.mode = mode
         if prev != mode:
-            self._safe_reconfig()
+            self.push_config_to_device()
         self.config_changed.emit()
         return True
 
@@ -347,7 +337,7 @@ class DeviceController(QObject):
         prev = self.current_config.oversampling
         self.current_config.oversampling = factor
         if prev != factor:
-            self._safe_reconfig()
+            self.push_config_to_device()
         self.config_changed.emit()
         return True
 
@@ -361,7 +351,7 @@ class DeviceController(QObject):
         prev = self.current_config.sample_rate
         self.current_config.sample_rate = hz
         if prev != hz:
-            self._safe_reconfig()
+            self.push_config_to_device()
         self.config_changed.emit()
         return True
 
@@ -425,35 +415,9 @@ class DeviceController(QObject):
         prev = self.current_config.frame_size
         self.current_config.frame_size = n
         if prev != n:
-            self._safe_reconfig()
+            self.push_config_to_device()
         self.config_changed.emit()
         return True
-
-    def _safe_reconfig(self) -> None:
-        """
-        Stop → send config → restart stream.
-        Mitiga el race condition del firmware: adc_capture_task no puede estar
-        corriendo mientras osc_adc_reconfigure() se ejecuta desde el cmd_task.
-        """
-        import time
-        cfg = self.current_config
-        was_streaming = cfg.streaming
-
-        if was_streaming:
-            # Parar el stream y esperar que el firmware liquide el batch en curso
-            self._send_command("CMD_STREAM_STOP", wait_ack=True)
-            cfg.streaming = False
-            time.sleep(0.20)  # 200ms: da tiempo al ADC DMA de vaciar su buffer
-
-        # Enviar la config nueva
-        self._send_command(f"CMD_SET_MODE {cfg.mode}",        wait_ack=True)
-        self._send_command(f"CMD_SET_RATE {cfg.sample_rate}", wait_ack=True)
-        self._send_command(f"CMD_SET_FRAME {cfg.frame_size}", wait_ack=True)
-
-        if was_streaming:
-            time.sleep(0.05)
-            self._send_command("CMD_STREAM_START", wait_ack=True)
-            cfg.streaming = True
 
     def set_pre_trigger(self, pct: int) -> bool:
         """
@@ -487,7 +451,7 @@ class DeviceController(QObject):
         return self._send_command("CMD_FACTORY_RESET")[0]
 
     def single_shot(self) -> bool:
-        logging.warning("Single shot no implementado en firmware todavia.")
+        logger.warning("Single shot no implementado en firmware todavia.")
         return False
 
     def get_status(self) -> bool:

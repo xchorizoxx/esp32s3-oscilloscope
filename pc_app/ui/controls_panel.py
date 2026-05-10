@@ -148,7 +148,8 @@ class ControlsPanel(QDockWidget):
             (83333,  "83 kHz (FW default)"),
             (100000, "100 kHz"),
             (125000, "125 kHz"),
-            (150000, "150 kHz (max)"),
+            (150000, "150 kHz"),
+            (160000, "160 kHz (max)"),
         ]
         for r_val, r_label in rate_entries:
             self.cb_rate.addItem(r_label, r_val)
@@ -156,7 +157,7 @@ class ControlsPanel(QDockWidget):
         self.cb_rate.setToolTip(
             "Frecuencia de muestreo del ADC (rate de hardware).\n"
             "En Dual CH: cada canal recibe rate/2.\n"
-            "Max hardware: 150 kHz. Default firmware: 83 kHz."
+            "Max hardware: 160 kHz. Default firmware: 83 kHz."
         )
         row_rate.addWidget(self.cb_rate)
         l_acq.addLayout(row_rate)
@@ -540,9 +541,13 @@ class ControlsPanel(QDockWidget):
 
         if calibrated:
             self.lbl_pga_status.setText("Calibrado")
+            self.lbl_pga_status.setStyleSheet("color: #22c55e; font-size: 10px;")
         elif enabled:
             self.lbl_pga_status.setText("Sin calibrar — use Calibrate")
             self.lbl_pga_status.setStyleSheet("color: #eab308; font-size: 10px;")
+        else:
+            self.lbl_pga_status.setText("")
+            self.lbl_pga_status.setStyleSheet("color: #a1a1aa; font-size: 10px;")
 
     def on_connection_changed(self, connected: bool):
         self.btn_connect.setChecked(connected)

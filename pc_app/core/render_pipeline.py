@@ -131,13 +131,15 @@ class RenderPipeline:
                            sample_rate: float) -> np.ndarray:
         """Apply high-pass IIR filter for AC coupling."""
         state = self._ac_state[channel]
+        if state['mode'] == 'GND':
+            return np.zeros_like(samples)
         if state['mode'] == 'DC' or samples is None:
             return samples
 
         # Fast vectorized frame-level EMA (avoids slow Python loops)
-        frame_mean = np.mean(samples)
+        frame_mean = float(np.mean(samples))
         if state['dc_offset'] is None:
-            state['dc_offset'] = float(frame_mean)
+            state['dc_offset'] = frame_mean
 
         # Update slow integrador
         alpha_ema = 0.05

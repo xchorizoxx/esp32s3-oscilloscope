@@ -226,23 +226,29 @@ static void process_command(const char *cmd)
         return;
     }
 
-    // CMD_GEN_START <freq> <duty>
-    if (strncmp(cmd, "CMD_GEN_START", 13) == 0) {
-        uint32_t freq = 0;
-        uint32_t duty = 0;
-        if (sscanf(cmd + 13, " %lu %lu", &freq, &duty) == 2) {
-            if (osc_gen_set_square(freq, duty) == ESP_OK)
-                osc_usb_send_ack(cmd);
-            else
-                osc_usb_send_nak(cmd, "parametros invalidos");
+    // CMD_GEN_START <wave_type> <freq_hz> <duty_pct>
+    if (strncmp(cmd, OSC_CMD_GEN_START, strlen(OSC_CMD_GEN_START)) == 0) {
+        uint32_t wave_type = 0, freq = 0, duty = 0;
+        if (sscanf(cmd + strlen(OSC_CMD_GEN_START), " %lu %lu %lu", &wave_type, &freq, &duty) == 3) {
+            if (wave_type == OSC_WAVE_SQUARE) {
+                if (osc_gen_set_square(freq, duty) == ESP_OK)
+                    osc_usb_send_ack(cmd);
+                else
+                    osc_usb_send_nak(cmd, "parametros invalidos");
+            } else {
+                if (osc_gen_set_wave((uint8_t)wave_type, freq, (uint8_t)duty) == ESP_OK)
+                    osc_usb_send_ack(cmd);
+                else
+                    osc_usb_send_nak(cmd, "parametros invalidos");
+            }
         } else {
-            osc_usb_send_nak(cmd, "2 argumentos requeridos: freq duty");
+            osc_usb_send_nak(cmd, "3 argumentos requeridos: wave_type freq duty");
         }
         return;
     }
 
     // CMD_GEN_STOP
-    if (strcmp(cmd, "CMD_GEN_STOP") == 0) {
+    if (strcmp(cmd, OSC_CMD_GEN_STOP) == 0) {
         osc_gen_stop();
         osc_usb_send_ack(cmd);
         return;

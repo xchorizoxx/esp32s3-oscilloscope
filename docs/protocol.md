@@ -187,6 +187,12 @@ end     1        CRC8
 
 Commands are **ASCII strings** terminated with `\n` (`0x0A`). Arguments separated by spaces.
 
+**Signal generator notes:**
+- `CMD_GEN_START` type `0` (square): LEDC PWM, 1–150000 Hz.
+- Types `1` (sine), `2` (triangle), `3` (saw): software DDS via portadora PWM 40 kHz, 1–2000 Hz.
+  Requiere filtro RC externo (1kΩ + 100nF) en el pin de salida para eliminar la
+  portadora y obtener la forma de onda analógica. Sin filtro se ve la PWM.
+
 | Command | Arguments | Response | Description |
 |---------|-----------|----------|-------------|
 | `CMD_GET_CAPS` | — | INFO frame + ACK | Query firmware capabilities |
@@ -200,6 +206,8 @@ Commands are **ASCII strings** terminated with `\n` (`0x0A`). Arguments separate
 | `CMD_SET_FRAME` | `<n>` | ACK | Frame size: 64/128/256/512/1024/2048/4096 |
 | `CMD_SET_PRE_TRIG` | `<n>` | ACK | Pre-trigger samples (0 to frame_size/2) |
 | `CMD_SET_FFT` | `<en>` | ACK | `0`=disable `1`=enable FFT |
+| `CMD_GEN_START` | `<type> <freq> <duty>` | ACK | Signal gen: type 0=SQ 1=SIN 2=TRI 3=SAW; freq Hz; duty % (1-99, square only) |
+| `CMD_GEN_STOP` | — | ACK | Stop signal generator (pin → LOW) |
 | `CMD_FACTORY_RESET` | — | ACK | Restore defaults and save to NVS |
 | `CMD_GET_STATUS` | — | MEASUREMENTS frame | Get current auto-measurements |
 

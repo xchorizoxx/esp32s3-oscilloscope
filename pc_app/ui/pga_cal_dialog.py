@@ -5,6 +5,8 @@ Allows auto-calibration, manual VG setting, per-step gain factor
 and offset correction, save/reset calibration to NVS.
 """
 
+import time
+
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
                              QLabel, QPushButton, QDoubleSpinBox, QComboBox,
                              QFormLayout, QMessageBox)
@@ -21,8 +23,13 @@ class _PgaCalWorker(QThread):
 
     def run(self):
         self._ctrl.pga_cal_start()
-        # The result comes asynchronously via PGA_INFO frame
-        self.finished.emit(True)
+        for _ in range(150):  # 30s timeout (150 * 200ms)
+            time.sleep(0.2)
+            self._ctrl.pga_get_info()
+            if self._ctrl.current_config.pga_calibrated:
+                self.finished.emit(True)
+                return
+        self.finished.emit(False)
 
 
 class PgaCalDialog(QDialog):
@@ -136,9 +143,9 @@ class PgaCalDialog(QDialog):
         self.btn_auto.setEnabled(True)
         if ok:
             self.lbl_status.setText("Auto-calibration complete!")
-            self._controller.pga_get_info()
+            self._on_step_changed(self.cb_step.currentIndex())
         else:
-            self.lbl_status.setText("Auto-calibration failed")
+            self.lbl_status.setText("Auto-calibration timeout (30s)")
 
     def _on_set_gain(self):
         step = self.cb_step.currentData()

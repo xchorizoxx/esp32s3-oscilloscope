@@ -482,15 +482,15 @@ class WaveformWidget(QWidget):
 
     def update_frame(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray, trigger_index: int = 0, sample_rate_hz: float = 100000.0):
         """Render a waveform frame. This is the SOLE controller of the X axis range."""
-        if self.roll_mode:
-            self._update_roll(t_us, ch1_mv, ch2_mv)
-            return
-
         if len(t_us) == 0:
             return
 
-        # 1. Convert sample indices to real microseconds
+        # Convert sample indices to real microseconds
         t_real_us = t_us * (1000000.0 / sample_rate_hz)
+
+        if self.roll_mode:
+            self._update_roll(t_real_us, ch1_mv, ch2_mv, sample_rate_hz)
+            return
 
         # 2. Align to trigger (t=0 at trigger point)
         if len(t_real_us) > trigger_index >= 0:
@@ -538,18 +538,21 @@ class WaveformWidget(QWidget):
         # 6. Update calibrated grid line positions
         self._update_grid_x(x_min, x_max)
 
-    def _update_roll(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray):
+    def _update_roll(self, t_us: np.ndarray, ch1_mv: np.ndarray, ch2_mv: np.ndarray, sample_rate_hz: float = 100000.0):
         """Roll mode: append new data and scroll the view."""
         n = len(t_us)
         if n == 0:
             return
 
         if not self.roll_paused:
-            # Calculate time step deterministically
-            dt_us = (t_us[-1] - t_us[0]) / n if n > 1 else self._last_dt_us
+            # t_us is in real microseconds, compute sample-to-sample delta
+            if n > 1:
+                dt_us = (t_us[-1] - t_us[0]) / (n - 1)
+            else:
+                dt_us = 1e6 / sample_rate_hz if sample_rate_hz > 0 else 10.0
             self._last_dt_us = dt_us
 
-            # Convert frame time axis to absolute rolling time
+            # Append to rolling buffer with absolute time
             abs_t = t_us + self._roll_t_offset
             self._roll_t_offset = abs_t[-1] + dt_us
 
@@ -562,14 +565,12 @@ class WaveformWidget(QWidget):
                 d2 = self._pga_adc_to_input_mv(ch2_mv, 1) + self.ch2_offset_mv
                 self._roll_ch2 = np.append(self._roll_ch2, d2)
 
-            # Trim to max points
+            # Trim to max points (coordinated across all arrays)
             if len(self._roll_t_us) > self._roll_max_pts:
                 excess = len(self._roll_t_us) - self._roll_max_pts
                 self._roll_t_us = self._roll_t_us[excess:]
-                if len(self._roll_ch1) > self._roll_max_pts:
-                    self._roll_ch1 = self._roll_ch1[excess:]
-                if len(self._roll_ch2) > self._roll_max_pts:
-                    self._roll_ch2 = self._roll_ch2[excess:]
+                self._roll_ch1 = self._roll_ch1[excess:]
+                self._roll_ch2 = self._roll_ch2[excess:]
 
         # Draw
         if self.ch1_visible and len(self._roll_ch1) > 0:

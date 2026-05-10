@@ -6,6 +6,7 @@ Integra ui_hold: STOP congela la visualizacion, RUN la descongela.
 
 import sys
 import os
+import logging
 from PyQt6.QtWidgets import QApplication
 
 from core.data_store import DataStore
@@ -15,6 +16,11 @@ from core.frame_parser import FrameParser
 from core.serial_reader import SerialReader
 from core.device_controller import DeviceController
 from ui.main_window import MainWindow
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+)
 
 
 def main():

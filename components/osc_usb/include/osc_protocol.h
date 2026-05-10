@@ -138,6 +138,16 @@ extern "C" {
 #define OSC_CMD_GET_STATUS "CMD_GET_STATUS"
 #define OSC_CMD_SET_OVERSAMPLE "CMD_SET_OVERSAMPLE"
 
+/* --- Tipos de onda para el generador de señales --- */
+#define OSC_WAVE_SQUARE   0
+#define OSC_WAVE_SINE     1
+#define OSC_WAVE_TRIANGLE 2
+#define OSC_WAVE_SAW      3
+
+/* --- Comandos del generador de señales --- */
+#define OSC_CMD_GEN_START "CMD_GEN_START"  ///< <wave_type> <freq_hz> <duty_pct> -> ACK
+#define OSC_CMD_GEN_STOP  "CMD_GEN_STOP"   ///< -> ACK
+
 /* --- Comandos PGA (Programable Gain Amplifier) --- */
 #define OSC_CMD_PGA_SET_STEP     "CMD_PGA_SET_STEP"    ///< <0-7> -> ACK
 #define OSC_CMD_PGA_CAL_START    "CMD_PGA_CAL_START"   ///< -> ACK (inicia auto-cal)
