@@ -125,7 +125,9 @@ static void process_command(const char *cmd)
 
     if (strcmp(cmd, OSC_CMD_FACTORY_RESET) == 0) {
         osc_config_factory_reset();
+        osc_pga_cal_reset();
         osc_usb_send_ack(cmd);
+        osc_usb_send_pga_info();
         return;
     }
 
@@ -264,6 +266,22 @@ static void process_command(const char *cmd)
                 osc_usb_send_nak(cmd, "factor invalido: 1, 2, 4, 8, 16");
         } else {
             osc_usb_send_nak(cmd, "argumento requerido");
+        }
+        return;
+    }
+
+    // CMD_ADC_SET_CORRECTION <factor>
+    if (strncmp(cmd, OSC_CMD_ADC_SET_CORRECTION, strlen(OSC_CMD_ADC_SET_CORRECTION)) == 0) {
+        float factor = 0;
+        if (sscanf(cmd + strlen(OSC_CMD_ADC_SET_CORRECTION), " %f", &factor) == 1) {
+            if (osc_config_set_adc_correction(factor) == ESP_OK) {
+                osc_adc_reconfigure();
+                osc_usb_send_ack(cmd);
+            } else {
+                osc_usb_send_nak(cmd, "factor out of range (1.0-1.1)");
+            }
+        } else {
+            osc_usb_send_nak(cmd, "argumento requerido: <factor>");
         }
         return;
     }
@@ -574,11 +592,11 @@ esp_err_t osc_usb_send_pga_info(void)
     osc_config_get(&cfg);
     buf[pos++] = cfg.pga_enabled ? 1 : 0;
 
-    // gain_nominal[8], gain_cal_factor[8], offset_cal_mv[8], bw_hz[8]
+    // gain_effective[8] (con GPIO Ron), gain_cal_factor[8], offset_cal_mv[8], bw_hz[8]
     for (int s = 0; s < 8; s++) {
         osc_pga_step_t info;
         osc_pga_get_step_info(s, &info);
-        memcpy(&buf[pos], &info.gain_nominal, 4); pos += 4;
+        memcpy(&buf[pos], &info.gain_effective, 4); pos += 4;
     }
 
     for (int s = 0; s < 8; s++) {
@@ -660,6 +678,11 @@ esp_err_t osc_usb_send_info(void)
     if (fw_len > 31) fw_len = 31;
     memcpy(&buf[pos], fw_str, fw_len);
     pos += 32;  // campo fijo de 32 bytes
+
+    osc_config_t cfg;
+    osc_config_get(&cfg);
+    float corr = cfg.adc_correction_factor;
+    memcpy(&buf[pos], &corr, 4); pos += 4;
 
     buf[pos] = crc8(buf, pos); pos++;
 

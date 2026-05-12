@@ -88,6 +88,7 @@ extern "C" {
 #define OSC_CMD_FACTORY_RESET "CMD_FACTORY_RESET"
 #define OSC_CMD_GET_STATUS "CMD_GET_STATUS"
 #define OSC_CMD_SET_OVERSAMPLE "CMD_SET_OVERSAMPLE"
+#define OSC_CMD_ADC_SET_CORRECTION "CMD_ADC_SET_CORRECTION" ///< <factor_float> -> ACK
 
 /* --- Tipos de onda para el generador de señales --- */
 #define OSC_WAVE_SQUARE   0

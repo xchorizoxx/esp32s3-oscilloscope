@@ -346,8 +346,8 @@ class FrameParser:
         return {'type': FRAME_NAK, 'cmd': cmd, 'reason': reason}
 
     def _parse_info(self) -> Optional[dict]:
-        # sync(2)+type(1)+maj(1)+min(1)+max_rate(4)+max_frame(2)+caps(2)+fw_str(32)+CRC(1) = 46
-        TOTAL = 46
+        # sync(2)+type(1)+maj(1)+min(1)+max_rate(4)+max_frame(2)+caps(2)+fw_str(32)+correction(4)+CRC(1) = 50
+        TOTAL = 50
         raw = self._check_and_consume(TOTAL)
         if raw is None:
             return None
@@ -360,6 +360,7 @@ class FrameParser:
         max_frame = struct.unpack_from('<H', raw, 9)[0]
         caps      = struct.unpack_from('<H', raw, 11)[0]
         fw_str    = raw[13:45].rstrip(b'\x00').decode('ascii', errors='replace')
+        adc_correction = struct.unpack_from('<f', raw, 45)[0]
 
         return {
             'type':             FRAME_INFO,
@@ -374,6 +375,7 @@ class FrameParser:
             'cap_oversample':   bool(caps & 0x04),
             'cap_clock_hack':   bool(caps & 0x08),
             'fw_string':        fw_str,
+            'adc_correction_factor': adc_correction,
         }
 
     def _parse_fft(self) -> Optional[dict]:

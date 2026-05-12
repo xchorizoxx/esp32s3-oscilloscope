@@ -76,6 +76,7 @@ class OscConfig:
     pga_r_nom_ohm: list = None
     pga_gpio_ron_ohm: float = 50.0
     pga_vg_default: float = 1450.0
+    adc_correction_factor: float = 1.037
 
     def __post_init__(self):
         if self.pga_gain_eff is None:
@@ -166,6 +167,9 @@ class DeviceController(QObject):
         self.max_sample_rate = info.get('max_rate_hz', 0)
         self.max_frame_size = info.get('max_frame_size', 0)
         self.capabilities = info
+        corr = info.get('adc_correction_factor')
+        if corr is not None:
+            self.current_config.adc_correction_factor = corr
 
     def _on_ack(self, cmd: str) -> None:
         base_cmd = cmd.split(' ')[0] if cmd else ''
@@ -225,6 +229,7 @@ class DeviceController(QObject):
         self.get_caps()
         # BUG-06 FIX: push current UI config to firmware
         self.push_config_to_device()
+        self._push_pga_blocking()
         self.config_changed.emit()
 
     def _push_config_blocking(self) -> None:
@@ -251,6 +256,14 @@ class DeviceController(QObject):
 
         if was_streaming:
             self._send_command("CMD_STREAM_START", wait_ack=True)
+
+    def _push_pga_blocking(self) -> None:
+        """Push de configuración PGA en hilo worker."""
+        if not self.connected:
+            return
+        cfg = self.current_config
+        self._send_command(f"CMD_PGA_SET_ENABLED {1 if cfg.pga_enabled else 0}", wait_ack=True)
+        self._send_command(f"CMD_PGA_SET_STEP {cfg.pga_step}", wait_ack=True)
 
     def push_config_to_device(self) -> None:
         """Despacha el push a un hilo worker para no bloquear la UI."""
@@ -559,4 +572,14 @@ class DeviceController(QObject):
         if not self.connected:
             return False
         ok, err = self._send_command("CMD_GEN_STOP")
+        return ok
+
+    # --- ADC Commands ---
+    def set_adc_correction(self, factor: float) -> bool:
+        if factor < 1.0 or factor > 1.1:
+            raise ValueError(f"Correction factor out of range: {factor}. Range: 1.0-1.1")
+        ok, err = self._send_command(f"CMD_ADC_SET_CORRECTION {factor:.6f}")
+        if ok:
+            self.current_config.adc_correction_factor = factor
+            self.config_changed.emit()
         return ok

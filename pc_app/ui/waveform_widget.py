@@ -427,7 +427,11 @@ class WaveformWidget(QWidget):
         self._update_gnd_markers()
 
     def set_trigger_level(self, mv: float, channel: int):
-        # El trigger debe moverse visualmente junto con el offset del canal asociado
+        # Convert from ADC-referenced mV to input-referenced mV if PGA is active
+        if channel == 0 and self._pga_enabled:
+            g = self._pga_gain_eff
+            if g > 0:
+                mv = (mv - self._pga_vg_mv - self._pga_offset_mv) / g / self._pga_div_ratio
         offset = self.ch1_offset_mv if channel == 0 else self.ch2_offset_mv
         self.trig_line.setPos(mv + offset)
         color = self.CH1_COLOR if channel == 0 else self.CH2_COLOR

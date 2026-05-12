@@ -46,6 +46,7 @@ typedef struct {
     uint32_t        auto_trigger_timeout_ms;
     bool            measurements_enabled;  ///< calcular Vpp/Vrms/etc en DSP
     uint8_t         oversample_factor;     ///< solo en OVERSAMPLE mode: 4/8/16
+    float           adc_correction_factor; ///< corrección no-lineal ADC 12dB (1.0-1.1)
 
     /* PGA (Programmable Gain Amplifier) */
     uint8_t         pga_step;              ///< paso de ganancia PGA 0-7
@@ -61,7 +62,7 @@ typedef struct {
     .trigger_edge             = OSC_TRIG_EDGE_RISING,\
     .trigger_channel          = 0,                   \
     .ch_atten                 = {OSC_ATTEN_12DB,     \
-                                   OSC_ATTEN_12DB},   \
+                                    OSC_ATTEN_12DB}, \
     .fft_enabled              = false,               \
     .streaming                = false,               \
     .pre_trigger_samples      = 128,                 \
@@ -70,9 +71,10 @@ typedef struct {
     .auto_trigger_timeout_ms  = 200,                 \
     .measurements_enabled     = true,                \
     .oversample_factor        = 1,                   \
+    .adc_correction_factor    = 1.037f,              \
     .pga_step                 = 0,                   \
     .pga_enabled              = false,               \
-    .pga_vg_mv                = 1600.0f,             \
+    .pga_vg_mv                = 1450.0f,             \
 }
 
 /* =========================================================================
@@ -107,6 +109,7 @@ esp_err_t osc_config_set_oversample(uint8_t factor);
 esp_err_t osc_config_set_pga_step(uint8_t step);
 esp_err_t osc_config_set_pga_enabled(bool en);
 esp_err_t osc_config_set_pga_vg(float vg_mv);
+esp_err_t osc_config_set_adc_correction(float factor);
 
 /** @brief Persistir configuración en NVS flash. */
 esp_err_t osc_config_save_nvs(void);

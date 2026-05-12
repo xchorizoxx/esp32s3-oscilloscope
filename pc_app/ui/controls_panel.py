@@ -60,6 +60,8 @@ class ControlsPanel(QDockWidget):
     pga_enabled_changed = pyqtSignal(bool)
     pga_step_changed = pyqtSignal(int)
     pga_cal_requested = pyqtSignal()
+    # ADC
+    adc_correction_requested = pyqtSignal(float)
 
     reload_requested = pyqtSignal()   # Reload App
 
@@ -392,6 +394,18 @@ class ControlsPanel(QDockWidget):
         self.lbl_pga_bw.setStyleSheet("color: #a1a1aa; font-size: 10px;")
         l_pga.addWidget(self.lbl_pga_bw)
 
+        self.lbl_pga_vg = QLabel("VG: -- mV")
+        self.lbl_pga_vg.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+        l_pga.addWidget(self.lbl_pga_vg)
+
+        self.lbl_pga_div = QLabel("Div: --")
+        self.lbl_pga_div.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+        l_pga.addWidget(self.lbl_pga_div)
+
+        self.lbl_pga_gain_now = QLabel("Gain: x--")
+        self.lbl_pga_gain_now.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+        l_pga.addWidget(self.lbl_pga_gain_now)
+
         self.btn_pga_cal = QPushButton("Calibrate PGA...")
         self.btn_pga_cal.setEnabled(False)
         l_pga.addWidget(self.btn_pga_cal)
@@ -401,6 +415,24 @@ class ControlsPanel(QDockWidget):
         l_pga.addWidget(self.lbl_pga_status)
 
         self.layout.addWidget(grp_pga)
+
+        # --- ADC Correction Factor ---
+        row_corr = QHBoxLayout()
+        row_corr.addWidget(QLabel("ADC Corr:"))
+        self.spin_adc_corr = QDoubleSpinBox()
+        self.spin_adc_corr.setRange(1.0, 1.1)
+        self.spin_adc_corr.setDecimals(4)
+        self.spin_adc_corr.setSingleStep(0.001)
+        self.spin_adc_corr.setValue(1.037)
+        row_corr.addWidget(self.spin_adc_corr)
+        btn_set_corr = QPushButton("Set")
+        btn_set_corr.clicked.connect(
+            lambda: self.adc_correction_requested.emit(self.spin_adc_corr.value()))
+        row_corr.addWidget(btn_set_corr)
+        self.lbl_adc_corr_status = QLabel("")
+        self.lbl_adc_corr_status.setStyleSheet("color: #a1a1aa; font-size: 9px;")
+        row_corr.addWidget(self.lbl_adc_corr_status)
+        self.layout.addLayout(row_corr)
 
         # --- 9. Theme + Reload ---
         grp_theme = QGroupBox("App")
@@ -467,7 +499,6 @@ class ControlsPanel(QDockWidget):
         # PGA
         self.chk_pga_enable.toggled.connect(self.pga_enabled_changed.emit)
         self.chk_pga_enable.toggled.connect(self.cb_pga_step.setEnabled)
-        self.chk_pga_enable.toggled.connect(self.btn_pga_cal.setEnabled)
         self.cb_pga_step.currentIndexChanged.connect(
             lambda i: self.pga_step_changed.emit(self.cb_pga_step.itemData(i)))
         self.btn_pga_cal.clicked.connect(self.pga_cal_requested.emit)
@@ -515,6 +546,8 @@ class ControlsPanel(QDockWidget):
         bws = info.get('bw_hz', [1000000.0]*8)
         enabled = info.get('enabled', False)
         calibrated = info.get('calibrated', False)
+        vg_mv = info.get('vg_mv', None)
+        div_ratio = info.get('div_ratio', None)
 
         self.cb_pga_step.blockSignals(True)
         for i in range(8):
@@ -537,7 +570,7 @@ class ControlsPanel(QDockWidget):
         self.chk_pga_enable.setChecked(enabled)
         self.chk_pga_enable.blockSignals(False)
         self.cb_pga_step.setEnabled(enabled)
-        self.btn_pga_cal.setEnabled(enabled)
+        self.btn_pga_cal.setEnabled(True)
 
         if calibrated:
             self.lbl_pga_status.setText("Calibrado")
@@ -548,6 +581,14 @@ class ControlsPanel(QDockWidget):
         else:
             self.lbl_pga_status.setText("")
             self.lbl_pga_status.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+
+        # Info labels
+        if vg_mv is not None:
+            self.lbl_pga_vg.setText(f"VG: {vg_mv:.1f} mV")
+        if div_ratio is not None:
+            self.lbl_pga_div.setText(f"Div: {div_ratio:.6f}")
+        current_gain = gains[step] if step < len(gains) else 0
+        self.lbl_pga_gain_now.setText(f"Gain: x{current_gain:.2f}")
 
     def on_connection_changed(self, connected: bool):
         self.btn_connect.setChecked(connected)

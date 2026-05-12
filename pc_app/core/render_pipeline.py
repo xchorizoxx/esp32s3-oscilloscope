@@ -4,9 +4,9 @@ render_pipeline.py — Extracted render logic from MainWindow._on_render_timer.
 Separates data processing stages into a clean pipeline:
   1. Fetch data from DataStore
   2. Apply AC coupling filter
-  3. Submit to MeasurementsEngine
+  3. Submit to MeasurementsEngine (PGA-corrected for CH1)
   4. Dispatch to appropriate render mode (normal, average, envelope, persistence)
-  5. Update secondary views (XY, FFT)
+  5. Update secondary views (XY, FFT) with PGA-corrected data
 """
 
 import numpy as np
@@ -16,10 +16,6 @@ from core.fft_engine import FFTEngine
 
 
 class RenderPipeline:
-    """
-    Stateless render pipeline that processes frames and dispatches
-    to the appropriate visualization widgets.
-    """
 
     def __init__(self, data_store: DataStore, meas_engine: MeasurementsEngine,
                  fft_engine: FFTEngine):
@@ -34,28 +30,41 @@ class RenderPipeline:
         }
         self._overflow_count = 0
 
+        # PGA state (copied from controller when it changes)
+        self._pga_enabled = False
+        self._pga_vg_mv = 1450.0
+        self._pga_gain_eff = 1.0
+        self._pga_offset_mv = 0.0
+        self._pga_div_ratio = 100000.0 / (1000000.0 + 100000.0)
+
     @property
     def overflow_count(self) -> int:
         return self._overflow_count
 
     def set_ac_mode(self, channel: int, mode: str):
-        """Set AC/DC coupling mode for a channel."""
         self._ac_state[channel]['mode'] = mode
         if mode == 'DC':
             self._ac_state[channel]['dc_offset'] = None
 
+    def set_pga_params(self, enabled: bool, vg_mv: float, gain_eff: float,
+                       offset_mv: float, div_ratio: float):
+        self._pga_enabled = enabled
+        self._pga_vg_mv = vg_mv
+        self._pga_gain_eff = gain_eff
+        self._pga_offset_mv = offset_mv
+        self._pga_div_ratio = div_ratio
+
+    def _apply_pga(self, samples: np.ndarray) -> np.ndarray:
+        """Apply PGA inverse transfer function to convert ADC mV to input mV."""
+        if not self._pga_enabled or samples is None or len(samples) == 0:
+            return samples
+        g = self._pga_gain_eff
+        if g <= 0:
+            return samples
+        return (samples - self._pga_vg_mv - self._pga_offset_mv) / g / self._pga_div_ratio
+
     def process_frame(self, cfg, waveform_widget, fft_widget=None,
                       xy_widget=None) -> bool:
-        """
-        Process one render cycle. Returns True if a frame was rendered.
-
-        Args:
-            cfg: OscConfig from the controller
-            waveform_widget: WaveformWidget instance
-            fft_widget: FFTWidget instance (optional, can be None/hidden)
-            xy_widget: XYWidget instance (optional, can be None/hidden)
-        """
-        # 1. Fetch data
         frames = self.data_store.get_last_n(5)
         if not frames:
             return False
@@ -74,14 +83,19 @@ class RenderPipeline:
         ch1 = self._apply_ac_coupling(ch1_raw, 0, rate) if ch1_raw is not None else None
         ch2 = self._apply_ac_coupling(ch2_raw, 1, rate) if ch2_raw is not None else None
 
-        # 4. Measurements (non-blocking, runs in separate thread)
-        self.meas_engine.submit(ch1, ch2, rate)
+        # 4. PGA correction for measurements, XY, and FFT
+        ch1_corrected = self._apply_pga(ch1) if ch1 is not None else None
 
-        # 5. Track overflow
+        # 5. Measurements (non-blocking — runs in separate thread)
+        self.meas_engine.submit(ch1_corrected, ch2, rate)
+
+        # 6. Track overflow
         if latest.get('overflow', False):
             self._overflow_count += 1
 
-        # 6. Waveform dispatch
+        # 7. Waveform dispatch
+        #    Note: waveform_widget does its OWN PGA correction in _pga_adc_to_input_mv()
+        #    so we pass uncorrected data here.
         mode = waveform_widget.display_mode
 
         if waveform_widget.roll_mode or mode == 'normal':
@@ -103,45 +117,48 @@ class RenderPipeline:
         elif mode == 'persistence':
             waveform_widget.update_persistence(frames, rate)
 
-        # 7. XY Render
+        # 8. XY Render (PGA-corrected CH1)
         if xy_widget and not xy_widget.isHidden():
-            xy_widget.update_xy(ch1, ch2)
+            xy_widget.update_xy(ch1_corrected, ch2)
 
-        # 8. FFT Render
+        # 9. FFT Render (PGA-corrected)
         if fft_widget and not fft_widget.isHidden():
             fft_mags = latest.get('fft_magnitudes')
             fft_bin_hz = latest.get('fft_bin_hz')
-            
+
             if fft_mags is not None and fft_bin_hz is not None and len(fft_mags) > 0:
                 freqs = np.arange(len(fft_mags)) * fft_bin_hz
-                # Evitar log10(0)
-                mags_safe = np.maximum(fft_mags, 1e-6)
+
+                # Correct FFT magnitudes for PGA gain and input divider
+                fft_mags_corrected = fft_mags.copy()
+                if self._pga_enabled:
+                    g = self._pga_gain_eff
+                    if g > 0:
+                        fft_mags_corrected = fft_mags_corrected / g / self._pga_div_ratio
+
+                mags_safe = np.maximum(fft_mags_corrected, 1e-6)
                 mags_db = 20 * np.log10(mags_safe)
-                
-                peak_idx = np.argmax(fft_mags)
+
+                peak_idx = np.argmax(fft_mags_corrected)
                 peak_freq = freqs[peak_idx]
-                peak_mag = fft_mags[peak_idx]
-                
-                # Por ahora el ESP32 solo calcula FFT del CH0, lo pasamos al canal 0
-                fft_widget.update_fft(0, freqs, fft_mags, mags_db, peak_freq, peak_mag)
+                peak_mag = fft_mags_corrected[peak_idx]
+
+                fft_widget.update_fft(0, freqs, fft_mags_corrected, mags_db, peak_freq, peak_mag)
 
         return True
 
     def _apply_ac_coupling(self, samples: np.ndarray, channel: int,
                            sample_rate: float) -> np.ndarray:
-        """Apply high-pass IIR filter for AC coupling."""
         state = self._ac_state[channel]
         if state['mode'] == 'GND':
             return np.zeros_like(samples)
         if state['mode'] == 'DC' or samples is None:
             return samples
 
-        # Fast vectorized frame-level EMA (avoids slow Python loops)
         frame_mean = float(np.mean(samples))
         if state['dc_offset'] is None:
             state['dc_offset'] = frame_mean
 
-        # Update slow integrador
         alpha_ema = 0.05
         state['dc_offset'] = alpha_ema * frame_mean + (1.0 - alpha_ema) * state['dc_offset']
 

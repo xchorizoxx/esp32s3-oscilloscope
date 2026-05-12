@@ -29,18 +29,14 @@ static const int s_atten_full_scale_mv[4] = {
     950,  // ADC_ATTEN_DB_0
     1250, // ADC_ATTEN_DB_2_5
     1750, // ADC_ATTEN_DB_6
-    2500, // ADC_ATTEN_DB_12 (era 3100, corregido a 2500)
+    3100, // ADC_ATTEN_DB_12
 };
 
 // Caché de atenuación para evitar mutex en el hot path
 static uint8_t s_current_atten[2] = {3, 3};
 
 /* --- Factores de Corrección --- */
-#define OSC_ADC_CORRECTION_FACTOR 1.037f // Ajuste para 12dB (3.268V / 3.15V)
-#define OSC_ADC_SATURATION_MV                                                  \
-  2500 // Punto donde empieza la corrección no-lineal
-#define OSC_ADC_CLIP_MIN_MV10 1500       // 150.0 mV * 10 — límite inferior rango lineal
-#define OSC_ADC_CLIP_MAX_MV10 27500      // 2750.0 mV * 10 — límite superior rango lineal
+#define OSC_ADC_SATURATION_MV    2500 // Punto donde empieza la corrección no-lineal
 
 /* Estado del filtro y decimación — se inicializa/resetea en osc_adc_start() */
 static int32_t s_acc_ch0 = 0;
@@ -48,6 +44,12 @@ static int32_t s_acc_ch1 = 0;
 static uint32_t s_acc_count = 0;
 static int16_t s_last_ch0 = 0;
 static bool s_has_ch0 = false;
+
+// Factor de corrección ADC para 12dB en zona no-lineal (configurable desde UI)
+static float s_adc_correction_factor = 1.037f;
+
+// Mutex para serializar adc_continuous_read entre capture task y calibración
+static SemaphoreHandle_t s_adc_read_mutex = NULL;
 
 static void reset_filter_state(void) {
   s_acc_ch0 = 0;
@@ -141,7 +143,8 @@ esp_err_t osc_adc_init(void) {
 
   s_ring_mutex = xSemaphoreCreateMutex();
   s_data_ready = xSemaphoreCreateBinary();
-  if (!s_ring_mutex || !s_data_ready)
+  s_adc_read_mutex = xSemaphoreCreateMutex();
+  if (!s_ring_mutex || !s_data_ready || !s_adc_read_mutex)
     return ESP_ERR_NO_MEM;
 
   osc_config_t cfg;
@@ -196,8 +199,6 @@ esp_err_t osc_adc_init(void) {
   uint32_t hw_rate = cfg.sample_rate_hz * n_channels;
   if (hw_rate < 20000)
     hw_rate = 20000;
-  if (hw_rate > 83333)
-    hw_rate = 83333;
 
   adc_continuous_config_t dig_cfg = {
       .pattern_num = n_channels,
@@ -216,15 +217,14 @@ esp_err_t osc_adc_init(void) {
   ESP_ERROR_CHECK(
       adc_continuous_register_event_callbacks(s_adc_handle, &cbs, NULL));
 
-  // --- Inicializar calibración ---
+  // --- Inicializar calibración para ambos canales (incluso en single mode) ---
   init_calibration(ADC_UNIT_1, ADC_CHANNEL_0, atten0, &s_cali_handle[0]);
-  if (n_channels == 2) {
-    init_calibration(ADC_UNIT_1, ADC_CHANNEL_1, atten1, &s_cali_handle[1]);
-  }
+  init_calibration(ADC_UNIT_1, ADC_CHANNEL_1, atten1, &s_cali_handle[1]);
 
   ESP_LOGI(TAG, "ADC init OK: %d ch @ %lu Hz", n_channels, cfg.sample_rate_hz);
   s_current_atten[0] = (uint8_t)cfg.ch_atten[0];
   s_current_atten[1] = (uint8_t)cfg.ch_atten[1];
+  s_adc_correction_factor = cfg.adc_correction_factor;
   return ESP_OK;
 }
 
@@ -266,6 +266,10 @@ esp_err_t osc_adc_stop(void) {
     vSemaphoreDelete(s_data_ready);
     s_data_ready = NULL;
   }
+  if (s_adc_read_mutex) {
+    vSemaphoreDelete(s_adc_read_mutex);
+    s_adc_read_mutex = NULL;
+  }
 
   ESP_LOGI(TAG, "ADC detenido");
   return ESP_OK;
@@ -296,22 +300,12 @@ static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx) {
   }
 
   // Aplicar corrección si estamos en 12dB (index 3) y el voltaje es alto
-  // (>2500mV)
+  // (>2500mV) — factor configurable desde UI
   if (s_current_atten[ch_idx] == 3 && voltage_mv > OSC_ADC_SATURATION_MV) {
-    voltage_mv = (int)(voltage_mv * OSC_ADC_CORRECTION_FACTOR);
+    voltage_mv = (int)(voltage_mv * s_adc_correction_factor);
   }
 
-  int16_t mv10 = (int16_t)(voltage_mv * 10);
-
-  if (mv10 < OSC_ADC_CLIP_MIN_MV10) {
-      s_overflow_count++;
-      mv10 = OSC_ADC_CLIP_MIN_MV10;
-  } else if (mv10 > OSC_ADC_CLIP_MAX_MV10) {
-      s_overflow_count++;
-      mv10 = OSC_ADC_CLIP_MAX_MV10;
-  }
-
-  return mv10;
+  return (int16_t)(voltage_mv * 10);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -330,8 +324,10 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
   }
 
   uint32_t bytes_read = 0;
+  if (s_adc_read_mutex) xSemaphoreTake(s_adc_read_mutex, portMAX_DELAY);
   esp_err_t ret = adc_continuous_read(s_adc_handle, s_raw_buf,
                                       RAW_READ_BUF_SIZE, &bytes_read, 0);
+  if (s_adc_read_mutex) xSemaphoreGive(s_adc_read_mutex);
   if (ret != ESP_OK || bytes_read == 0)
     return ESP_ERR_TIMEOUT;
 
@@ -412,12 +408,14 @@ int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms)
     size_t count = 0;
     uint32_t elapsed = 0;
     uint32_t step_ms = (timeout_ms < 10) ? timeout_ms : 10;
+    uint8_t tmp[256];
 
     while (elapsed < timeout_ms) {
         uint32_t bytes_read = 0;
-        uint8_t tmp[4096];
+        if (s_adc_read_mutex) xSemaphoreTake(s_adc_read_mutex, portMAX_DELAY);
         esp_err_t ret = adc_continuous_read(s_adc_handle, tmp, sizeof(tmp),
                                             &bytes_read, pdMS_TO_TICKS(step_ms));
+        if (s_adc_read_mutex) xSemaphoreGive(s_adc_read_mutex);
         elapsed += step_ms;
         if (ret != ESP_OK || bytes_read == 0) continue;
 

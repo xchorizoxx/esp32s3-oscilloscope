@@ -29,7 +29,7 @@ static uint8_t       s_current_step = 0;
 static osc_pga_cal_t s_cal;
 static bool          s_initialized  = false;
 
-volatile bool g_pga_gain_changed = false;
+volatile uint32_t g_pga_gain_change_count = 0;
 
 static osc_pga_step_t s_steps[OSC_PGA_NUM_STEPS];
 
@@ -169,7 +169,7 @@ esp_err_t osc_pga_set_step(uint8_t step)
     if (step >= OSC_PGA_NUM_STEPS) return ESP_ERR_INVALID_ARG;
     if (step == s_current_step) return ESP_OK;
 
-    g_pga_gain_changed = true;
+    g_pga_gain_change_count++;
     apply_gpio_mask(s_step_gpio_mask[step]);
     s_current_step = step;
 
@@ -288,6 +288,7 @@ esp_err_t osc_pga_cal_set_gain_factor(uint8_t step, float factor)
 esp_err_t osc_pga_cal_set_offset(uint8_t step, float offset_mv)
 {
     if (step >= OSC_PGA_NUM_STEPS) return ESP_ERR_INVALID_ARG;
+    if (offset_mv < -500.0f || offset_mv > 500.0f) return ESP_ERR_INVALID_ARG;
     s_cal.offset_cal_mv[step] = offset_mv;
     return ESP_OK;
 }
@@ -349,6 +350,8 @@ esp_err_t osc_pga_cal_load(void)
     if (ret == ESP_OK && size == sizeof(osc_pga_cal_t)) {
         memcpy(&s_cal, &tmp, sizeof(osc_pga_cal_t));
         ESP_LOGI(TAG, "Calibracion cargada desde NVS. VG=%.1f mV", s_cal.vg_mv);
+    } else if (ret == ESP_OK) {
+        ret = ESP_ERR_INVALID_SIZE;
     }
     return ret;
 }
@@ -361,6 +364,7 @@ esp_err_t osc_pga_cal_reset(void)
         s_cal.gain_cal_factor[i] = 1.0f;
         s_cal.offset_cal_mv[i]   = 0.0f;
     }
+    osc_config_set_pga_vg(s_cal.vg_default);
     precompute_steps();
     return osc_pga_cal_save();
 }

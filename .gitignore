@@ -35,3 +35,6 @@ pc_app/*.spec
 
 # Other
 cardputer-oscilloscope-main/
+.ctx/
+.opencode/
+opencode.json

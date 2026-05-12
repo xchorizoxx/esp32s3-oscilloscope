@@ -49,7 +49,7 @@ typedef struct {
     bool     calibrated;
 } osc_pga_cal_t;
 
-extern volatile bool g_pga_gain_changed;
+extern volatile uint32_t g_pga_gain_change_count;
 
 esp_err_t osc_pga_init(void);
 esp_err_t osc_pga_set_step(uint8_t step);

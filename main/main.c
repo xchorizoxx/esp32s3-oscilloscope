@@ -233,10 +233,13 @@ static void dsp_process_task(void *arg)
         if (frame_fill < cfg.frame_size) continue;
 
         // Descartar frame si hubo cambio de ganancia PGA durante la captura
-        if (g_pga_gain_changed) {
-            g_pga_gain_changed = false;
-            frame_fill = 0;
-            continue;
+        // (counter incrementa en cada set_step, comparación atómica sin race)
+        { static uint32_t prev_gain_count = 0;
+          if (prev_gain_count != g_pga_gain_change_count) {
+              prev_gain_count = g_pga_gain_change_count;
+              frame_fill = 0;
+              continue;
+          }
         }
 
         // --- Trigger evaluation ---

@@ -137,6 +137,7 @@ class MainWindow(QMainWindow):
         cp.pga_enabled_changed.connect(self._on_pga_enabled_changed)
         cp.pga_step_changed.connect(self._on_pga_step_changed)
         cp.pga_cal_requested.connect(self._on_pga_cal_requested)
+        cp.adc_correction_requested.connect(self._on_adc_correction_requested)
 
         cp.timebase_changed.connect(self.waveform_widget.set_timebase)
         cp.roll_mode_changed.connect(self.waveform_widget.set_roll_mode)
@@ -156,15 +157,9 @@ class MainWindow(QMainWindow):
         cp.ch1_panel.attenuation_changed.connect(lambda a: self.controller.set_attenuation(0, a))
         cp.ch1_panel.coupling_changed.connect(lambda c: self._on_coupling_changed(0, c))
         # BUG-12 FIX: CAL GND resets EMA integrator for CH1
-        cp.ch1_panel.cal_gnd_requested.connect(lambda: self._on_cal_gnd(0))
+        cp.ch1_panel.cal_gnd_requested.connect(lambda: self._reset_ac_coupling(0))
 
-        cp.ch2_panel.visibility_changed.connect(lambda v: self.waveform_widget.set_ch_visible(1, v))
-        cp.ch2_panel.scale_changed.connect(lambda s: self.waveform_widget.set_voltage_scale(s, 1))
-        cp.ch2_panel.offset_changed.connect(lambda o: self.waveform_widget.set_ch_offset(1, o))
-        cp.ch2_panel.attenuation_changed.connect(lambda a: self.controller.set_attenuation(1, a))
-        cp.ch2_panel.coupling_changed.connect(lambda c: self._on_coupling_changed(1, c))
-        # BUG-12 FIX: CAL GND resets EMA integrator for CH2
-        cp.ch2_panel.cal_gnd_requested.connect(lambda: self._on_cal_gnd(1))
+        cp.ch2_panel.cal_gnd_requested.connect(lambda: self._reset_ac_coupling(1))
 
         # Trigger
         cp.trig_panel.trigger_hw_changed.connect(self.controller.set_trigger)
@@ -241,15 +236,11 @@ class MainWindow(QMainWindow):
             self._ac_couple_state[ch]['dc_offset'] = None
         self.controller.set_coupling(ch, coupling)
 
-    def _on_cal_gnd(self, ch: int):
-        """
-        BUG-12 FIX: Calibracion de GND.
-        Resetea el integrador EMA del canal dado para que la senal se
-        muestre centrada en su nivel real de cero del ADC.
-        Corrige el sintoma: 'senal cae a -1V al desconectar la entrada'.
-        """
+    def _reset_ac_coupling(self, ch: int):
+        """Resetea el integrador EMA del canal dado.
+           Esto NO es una calibración de hardware — solo reinicia el
+           filtro AC coupling software en la PC."""
         self._ac_couple_state[ch]['dc_offset'] = None
-        # Tambien limpiar la pantalla para que el usuario vea el efecto inmediato
         if ch == 0:
             self.waveform_widget.curve_ch1.setData([], [])
         else:
@@ -283,6 +274,7 @@ class MainWindow(QMainWindow):
             'offset_cal': cfg.pga_offset_cal,
             'bw_hz': cfg.pga_bw_hz,
             'vg_mv': cfg.pga_vg_mv,
+            'div_ratio': cfg.pga_div_ratio,
             'calibrated': cfg.pga_calibrated,
             'enabled': cfg.pga_enabled,
         })
@@ -292,6 +284,9 @@ class MainWindow(QMainWindow):
         self.waveform_widget.set_pga_params(
             enabled=cfg.pga_enabled, step=cfg.pga_step, vg_mv=cfg.pga_vg_mv,
             gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        self.render_pipeline.set_pga_params(
+            enabled=cfg.pga_enabled, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
 
         bw = cfg.pga_bw_hz[cfg.pga_step] if cfg.pga_step < len(cfg.pga_bw_hz) else 1000000.0
         self.meas_panel.update_pga_display(gain, bw)
@@ -299,10 +294,8 @@ class MainWindow(QMainWindow):
     def _on_pga_enabled_changed(self, enabled: bool):
         if not self.controller.connected:
             return
-        self.controller.current_config.pga_enabled = enabled
         self.controller.set_pga_enabled(enabled)
         self.controls_panel.cb_pga_step.setEnabled(enabled)
-        self.controls_panel.btn_pga_cal.setEnabled(enabled)
         if enabled:
             self.controller.pga_get_info()
 
@@ -317,6 +310,7 @@ class MainWindow(QMainWindow):
             'offset_cal': cfg.pga_offset_cal,
             'bw_hz': cfg.pga_bw_hz,
             'vg_mv': cfg.pga_vg_mv,
+            'div_ratio': cfg.pga_div_ratio,
             'calibrated': cfg.pga_calibrated,
             'enabled': cfg.pga_enabled,
         })
@@ -325,15 +319,26 @@ class MainWindow(QMainWindow):
         self.waveform_widget.set_pga_params(
             enabled=cfg.pga_enabled, step=step, vg_mv=cfg.pga_vg_mv,
             gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        self.render_pipeline.set_pga_params(
+            enabled=cfg.pga_enabled, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
         bw = cfg.pga_bw_hz[step] if step < len(cfg.pga_bw_hz) else 1000000.0
         self.meas_panel.update_pga_display(gain, bw)
 
     def _on_pga_cal_requested(self):
-        if not self.controller.connected:
-            return
         dialog = PgaCalDialog(self.controller, self)
         dialog.exec()
-        self.controller.pga_get_info()
+        if self.controller.connected:
+            self.controller.pga_get_info()
+
+    def _on_adc_correction_requested(self, factor: float):
+        if not self.controller.connected:
+            return
+        ok = self.controller.set_adc_correction(factor)
+        if ok:
+            self.controls_panel.lbl_adc_corr_status.setText("OK")
+        else:
+            self.controls_panel.lbl_adc_corr_status.setText("FAIL")
 
     def _populate_ports(self):
         current = self.controls_panel.cb_ports.currentText()
@@ -361,14 +366,26 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([self.height() // 2, self.height() // 2, 0])
 
     def _on_auto_scale(self):
+        import numpy as np
         frames = self.data_store.get_last_n(1)
         if not frames:
             return
         latest = frames[-1]
-        ch1 = latest.get('ch0_mv')
-        ch2 = latest.get('ch1_mv')
+        ch1_raw = latest.get('ch0_mv')
+        ch2_raw = latest.get('ch1_mv')
         rate = self.controller.current_config.sample_rate
         count = latest.get('sample_count', 0)
+
+        ch1 = np.array(ch1_raw, dtype=np.float32) if ch1_raw is not None else None
+        ch2 = np.array(ch2_raw, dtype=np.float32) if ch2_raw is not None else None
+
+        if ch1 is not None and self.controller.current_config.pga_enabled:
+            cfg = self.controller.current_config
+            gain = cfg.pga_gain_eff[cfg.pga_step] if cfg.pga_step < len(cfg.pga_gain_eff) else 1.0
+            offset = cfg.pga_offset_cal[cfg.pga_step] if cfg.pga_step < len(cfg.pga_offset_cal) else 0.0
+            if gain > 0:
+                ch1 = (ch1 - cfg.pga_vg_mv - offset) / gain / cfg.pga_div_ratio
+
         self.waveform_widget.auto_scale(ch1, ch2, rate, count)
 
     def _on_autoscale_finished(self, scale_mv: float, timebase_us: float):

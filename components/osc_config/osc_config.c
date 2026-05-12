@@ -189,6 +189,15 @@ esp_err_t osc_config_set_pga_vg(float vg_mv)
     return ESP_OK;
 }
 
+esp_err_t osc_config_set_adc_correction(float factor)
+{
+    if (factor < 1.0f || factor > 1.1f) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.adc_correction_factor = factor;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
 /* -------------------------------------------------------------------------- */
 esp_err_t osc_config_save_nvs(void)
 {
@@ -223,6 +232,8 @@ esp_err_t osc_config_load_nvs(void)
         memcpy(&s_config, &tmp, sizeof(osc_config_t));
         xSemaphoreGive(s_mutex);
         ESP_LOGI(TAG, "Config cargada desde NVS");
+    } else if (ret == ESP_OK && required != sizeof(osc_config_t)) {
+        ret = ESP_ERR_INVALID_SIZE;
     }
     return ret;
 }
