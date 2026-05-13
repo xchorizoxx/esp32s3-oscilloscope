@@ -199,6 +199,8 @@ esp_err_t osc_adc_init(void) {
   uint32_t hw_rate = cfg.sample_rate_hz * n_channels;
   if (hw_rate < 20000)
     hw_rate = 20000;
+  if (hw_rate > SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
+    hw_rate = SOC_ADC_SAMPLE_FREQ_THRES_HIGH;
 
   adc_continuous_config_t dig_cfg = {
       .pattern_num = n_channels,
