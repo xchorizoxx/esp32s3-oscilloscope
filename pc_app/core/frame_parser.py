@@ -253,8 +253,9 @@ class FrameParser:
             fft_magnitudes = np.frombuffer(raw[offset:offset + fft_bytes], dtype='<f4')
             offset += fft_bytes
 
-        # time_axis_us: placeholder
-        time_axis_us = np.arange(sample_count, dtype=np.float64)
+        # time_axis_idx: raw sample indices (0..sample_count-1).
+        # Callers must multiply by (1e6 / sample_rate_hz) to get real microseconds.
+        time_axis_idx = np.arange(sample_count, dtype=np.float64)
 
         return {
             'type':          FRAME_DATA,
@@ -270,7 +271,7 @@ class FrameParser:
             'trigger_index': trigger_idx,
             'ch0_mv':        ch0_mv,
             'ch1_mv':        ch1_mv,
-            'time_axis_us':  time_axis_us,
+            'time_axis_us':  time_axis_idx,  # PC-14: name kept for API compat; values are INDICES
             'fft_magnitudes': fft_magnitudes,
             'fft_bin_hz':    fft_bin_hz,
         }

@@ -333,3 +333,22 @@ class PgaCalDialog(QDialog):
             self.lbl_status.setText("Calibration reset to defaults")
             self._controller.pga_get_info()
             self._refresh_from_config()
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def _stop_worker(self):
+        """PC-10 FIX: Stop auto-cal worker before dialog is destroyed.
+        Prevents the finished signal from being delivered to a dead widget."""
+        if hasattr(self, '_worker') and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(2000)  # Max 2 s grace period
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._stop_worker()
+        super().reject()

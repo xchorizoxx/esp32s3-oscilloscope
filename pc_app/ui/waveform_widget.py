@@ -204,6 +204,9 @@ class WaveformWidget(QWidget):
         self._pga_offset_mv = 0.0
         self._pga_div_ratio = 100000.0 / (1000000.0 + 100000.0)  # 1/11
 
+        # PC-13: cache last overlay width to avoid repositioning every frame
+        self._last_overlay_width = -1
+
         # --- Calibrated grid lines (10 vertical × 8 horizontal) ---
         self._grid_lines_x = []
         self._grid_lines_y = []
@@ -383,9 +386,13 @@ class WaveformWidget(QWidget):
         else:
             self._overlay_ch2.setText("  CH2  --  ")
         self._overlay_ch2.adjustSize()
-        # Position CH2 in top-right corner
+
+        # PC-13 FIX: Only reposition overlays when the widget width has changed.
         pw = self.plot_widget.width()
-        self._overlay_ch2.move(pw - self._overlay_ch2.width() - 8, 8)
+        if pw != self._last_overlay_width:
+            self._last_overlay_width = pw
+            self._overlay_ch2.move(pw - self._overlay_ch2.width() - 8, 8)
+            self._overlay_tdiv.move((pw - self._overlay_tdiv.width()) // 2, 8)
 
         # T/div display centered at top
         t = self.timebase_us
@@ -394,7 +401,6 @@ class WaveformWidget(QWidget):
         else:
             self._overlay_tdiv.setText(f"  {t:.0f} µs/div  ")
         self._overlay_tdiv.adjustSize()
-        self._overlay_tdiv.move((pw - self._overlay_tdiv.width()) // 2, 8)
 
     def set_timebase(self, us_per_div: float):
         self.timebase_us = us_per_div
@@ -508,12 +514,16 @@ class WaveformWidget(QWidget):
         if self.ch1_visible and ch1_mv is not None and len(t_aligned) > 0:
             data1 = self._pga_adc_to_input_mv(ch1_mv, 0) + self.ch1_offset_mv
             pts_per_div = self.timebase_us / (1000000.0 / sample_rate_hz)
-            if pts_per_div < 50 and len(t_aligned) >= 4:
+            # PC-05 FIX: k=3 spline requires >= k+2 = 5 points; add try/except for safety
+            if pts_per_div < 50 and len(t_aligned) >= 5:
                 factor = int(50 / pts_per_div) + 1
                 new_len = len(data1) * factor
                 t_new = np.linspace(t_aligned[0], t_aligned[-1], new_len)
-                spline = make_interp_spline(t_aligned, data1, k=3)
-                self.curve_ch1.setData(t_new, spline(t_new))
+                try:
+                    spline = make_interp_spline(t_aligned, data1, k=3)
+                    self.curve_ch1.setData(t_new, spline(t_new))
+                except ValueError:
+                    self.curve_ch1.setData(t_aligned, data1)
             else:
                 self.curve_ch1.setData(t_aligned, data1)
         else:
@@ -524,12 +534,16 @@ class WaveformWidget(QWidget):
             factor_escala = self.ch1_scale_mv / self.ch2_scale_mv
             data2 = (self._pga_adc_to_input_mv(ch2_mv, 1) * factor_escala) + self.ch2_offset_mv
             pts_per_div = self.timebase_us / (1000000.0 / sample_rate_hz)
-            if pts_per_div < 50 and len(t_aligned) >= 4:
+            # PC-05 FIX: same guard and exception handling for CH2
+            if pts_per_div < 50 and len(t_aligned) >= 5:
                 factor = int(50 / pts_per_div) + 1
                 new_len = len(data2) * factor
                 t_new = np.linspace(t_aligned[0], t_aligned[-1], new_len)
-                spline = make_interp_spline(t_aligned, data2, k=3)
-                self.curve_ch2.setData(t_new, spline(t_new))
+                try:
+                    spline = make_interp_spline(t_aligned, data2, k=3)
+                    self.curve_ch2.setData(t_new, spline(t_new))
+                except ValueError:
+                    self.curve_ch2.setData(t_aligned, data2)
             else:
                 self.curve_ch2.setData(t_aligned, data2)
         else:
@@ -572,11 +586,19 @@ class WaveformWidget(QWidget):
                 self._roll_ch2 = np.append(self._roll_ch2, d2)
 
             # Trim to max points (coordinated across all arrays)
+            # PC-07 FIX: guard slicing by actual array lengths to prevent desync
+            # in single-channel mode where _roll_ch2 is shorter than _roll_t_us.
             if len(self._roll_t_us) > self._roll_max_pts:
                 excess = len(self._roll_t_us) - self._roll_max_pts
                 self._roll_t_us = self._roll_t_us[excess:]
-                self._roll_ch1 = self._roll_ch1[excess:]
-                self._roll_ch2 = self._roll_ch2[excess:]
+                if len(self._roll_ch1) >= excess:
+                    self._roll_ch1 = self._roll_ch1[excess:]
+                elif len(self._roll_ch1) > 0:
+                    self._roll_ch1 = np.array([], dtype=np.float32)
+                if len(self._roll_ch2) >= excess:
+                    self._roll_ch2 = self._roll_ch2[excess:]
+                elif len(self._roll_ch2) > 0:
+                    self._roll_ch2 = np.array([], dtype=np.float32)
 
         # Draw
         if self.ch1_visible and len(self._roll_ch1) > 0:
@@ -609,6 +631,23 @@ class WaveformWidget(QWidget):
             self.curve_ch1.setData([], [])
             self.curve_ch2.setData([], [])
             self._update_ranges()
+
+    # ==================================================================
+    # Public clear() API  (PC-15 FIX: MainWindow no longer pokes internals)
+    # ==================================================================
+
+    def clear(self):
+        """Clears all rendered curves. Called on disconnect to prevent ghost frames."""
+        self.curve_ch1.setData([], [])
+        self.curve_ch2.setData([], [])
+        for c in self.persistence_curves_ch1:
+            c.setData([], [])
+        for c in self.persistence_curves_ch2:
+            c.setData([], [])
+        self._env_ch1_lo.setData([], [])
+        self._env_ch1_hi.setData([], [])
+        self._env_ch2_lo.setData([], [])
+        self._env_ch2_hi.setData([], [])
 
     def update_envelope(self, t_us: np.ndarray, ch1_min, ch1_max, ch2_min, ch2_max, sample_rate_hz: float = 100000.0):
         # Conversión a tiempo real

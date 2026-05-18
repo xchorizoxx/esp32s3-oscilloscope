@@ -216,18 +216,8 @@ class MainWindow(QMainWindow):
             self._clear_waveform()
 
     def _clear_waveform(self):
-        """Borra todas las curvas del waveform widget (evita ghost frames)."""
-        ww = self.waveform_widget
-        ww.curve_ch1.setData([], [])
-        ww.curve_ch2.setData([], [])
-        for c in ww.persistence_curves_ch1:
-            c.setData([], [])
-        for c in ww.persistence_curves_ch2:
-            c.setData([], [])
-        ww._env_ch1_lo.setData([], [])
-        ww._env_ch1_hi.setData([], [])
-        ww._env_ch2_lo.setData([], [])
-        ww._env_ch2_hi.setData([], [])
+        """Delega el borrado de curvas al WaveformWidget (PC-15 FIX: no more internal access)."""
+        self.waveform_widget.clear()
 
     def _on_coupling_changed(self, ch: int, coupling: str):
         """Maneja cambio de AC/DC/GND coupling. Actualiza estado local y controller."""
@@ -292,10 +282,22 @@ class MainWindow(QMainWindow):
         self.meas_panel.update_pga_display(gain, bw)
 
     def _on_pga_enabled_changed(self, enabled: bool):
+        # PC-03 FIX: always update local config + pipeline state, even when offline.
+        # This ensures waveform_widget and render_pipeline stay consistent.
+        self.controller.current_config.pga_enabled = enabled
+        self.controls_panel.cb_pga_step.setEnabled(enabled)
+        cfg = self.controller.current_config
+        gain   = cfg.pga_gain_eff[cfg.pga_step]   if cfg.pga_step < len(cfg.pga_gain_eff)   else 1.0
+        offset = cfg.pga_offset_cal[cfg.pga_step] if cfg.pga_step < len(cfg.pga_offset_cal) else 0.0
+        self.waveform_widget.set_pga_params(
+            enabled=enabled, step=cfg.pga_step, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        self.render_pipeline.set_pga_params(
+            enabled=enabled, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
         if not self.controller.connected:
             return
         self.controller.set_pga_enabled(enabled)
-        self.controls_panel.cb_pga_step.setEnabled(enabled)
         if enabled:
             self.controller.pga_get_info()
 
@@ -332,11 +334,14 @@ class MainWindow(QMainWindow):
             self.controller.pga_get_info()
 
     def _on_adc_correction_requested(self, factor: float):
-        if not self.controller.connected:
-            return
+        # PC-08 FIX: set_adc_correction now updates local config unconditionally.
+        # Returns True even when offline (saved locally, pushed on next connect).
         ok = self.controller.set_adc_correction(factor)
         if ok:
-            self.controls_panel.lbl_adc_corr_status.setText("OK")
+            if self.controller.connected:
+                self.controls_panel.lbl_adc_corr_status.setText("OK")
+            else:
+                self.controls_panel.lbl_adc_corr_status.setText("Saved (offline)")
         else:
             self.controls_panel.lbl_adc_corr_status.setText("FAIL")
 

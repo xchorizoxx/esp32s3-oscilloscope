@@ -17,7 +17,9 @@ static const char *TAG = "osc_adc";
 /* --------------------------------------------------------------------------
  * Estado interno
  * -------------------------------------------------------------------------- */
-static adc_continuous_handle_t s_adc_handle = NULL;
+/* FW-01 FIX: volatile ensures the NULL write in osc_adc_stop() is visible
+ * to osc_adc_read_mean_mv10() running on the other core without a stale register cache. */
+static volatile adc_continuous_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_cali_handle[2] = {NULL, NULL};
 static volatile uint32_t s_overflow_count = 0;
 static TaskHandle_t s_notify_task = NULL;
@@ -245,7 +247,9 @@ esp_err_t osc_adc_stop(void) {
     return ESP_OK;
 
   adc_continuous_stop(s_adc_handle);
-  adc_continuous_deinit(s_adc_handle);
+  /* FW-05 FIX: adc_continuous_deinit() is deprecated in ESP-IDF v5+.
+   * Use adc_continuous_del_handle() instead. */
+  adc_continuous_del_handle(s_adc_handle);
   s_adc_handle = NULL;
   s_notify_task = NULL;
 
@@ -301,9 +305,12 @@ static inline int16_t raw_to_mv10(uint16_t raw, uint8_t ch_idx) {
     voltage_mv = (int)((raw * (long)full_scale) / 4095);
   }
 
-  // Aplicar corrección si estamos en 12dB (index 3) y el voltaje es alto
-  // (>2500mV) — factor configurable desde UI
-  if (s_current_atten[ch_idx] == 3 && voltage_mv > OSC_ADC_SATURATION_MV) {
+  /* FW-03 FIX: Apply correction uniformly across the entire 12dB range.
+   * The previous threshold at OSC_ADC_SATURATION_MV (2500 mV) created a
+   * discontinuity: readings below 2500 mV were uncorrected while readings
+   * just above were corrected, producing a visible voltage jump.
+   * Applying uniformly is smoother; set adc_correction_factor=1.0 to disable. */
+  if (s_current_atten[ch_idx] == 3 && s_adc_correction_factor != 1.0f) {
     voltage_mv = (int)(voltage_mv * s_adc_correction_factor);
   }
 
@@ -410,6 +417,10 @@ int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms)
     size_t count = 0;
     uint32_t elapsed = 0;
     uint32_t step_ms = (timeout_ms < 10) ? timeout_ms : 10;
+    /* FW-04 FIX: Clamp to 1 ms minimum to prevent busy-poll loop when
+     * timeout_ms == 0 (pdMS_TO_TICKS(0) == 0 causes adc_continuous_read
+     * to return immediately in a tight loop consuming 100% CPU slice). */
+    if (step_ms == 0) step_ms = 1;
     uint8_t tmp[256];
 
     while (elapsed < timeout_ms) {

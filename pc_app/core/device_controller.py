@@ -106,6 +106,8 @@ class _ConfigPushWorker(QObject):
             self._ctrl._push_config_blocking()
         elif self._mode == "atten":
             self._ctrl._push_atten_blocking()
+        elif self._mode == "pga":
+            self._ctrl._push_pga_blocking()
         self.finished.emit()
 
 class DeviceController(QObject):
@@ -131,6 +133,12 @@ class DeviceController(QObject):
         self._pending_ack: str | None = None
         self._ack_event = threading.Event()
         self._nak_reason: str = ""
+
+        # PC-01/PC-11 FIX: Per-operation locks prevent double-start race and GC leaks.
+        # Each lock is acquired before starting the thread and released in finished signal.
+        self._config_push_lock = threading.Lock()
+        self._atten_push_lock  = threading.Lock()
+        self._pga_push_lock    = threading.Lock()
 
         # Conectar senales del reader
         self.reader.info_received.connect(self._on_info)
@@ -227,9 +235,9 @@ class DeviceController(QObject):
         if not self.connected:
             return
         self.get_caps()
-        # BUG-06 FIX: push current UI config to firmware
+        # Push current UI config to firmware via non-blocking workers
         self.push_config_to_device()
-        self._push_pga_blocking()
+        self.push_pga_to_device()   # PC-04 FIX: was _push_pga_blocking() on main thread
         self.config_changed.emit()
 
     def _push_config_blocking(self) -> None:
@@ -254,6 +262,12 @@ class DeviceController(QObject):
             wait_ack=True
         )
 
+        # PC-08 FIX: always sync ADC correction factor to firmware on connect
+        self._send_command(
+            f"CMD_ADC_SET_CORRECTION {cfg.adc_correction_factor:.6f}",
+            wait_ack=True
+        )
+
         if was_streaming:
             self._send_command("CMD_STREAM_START", wait_ack=True)
 
@@ -266,11 +280,13 @@ class DeviceController(QObject):
         self._send_command(f"CMD_PGA_SET_STEP {cfg.pga_step}", wait_ack=True)
 
     def push_config_to_device(self) -> None:
-        """Despacha el push a un hilo worker para no bloquear la UI."""
+        """Despacha el push a un hilo worker para no bloquear la UI.
+        PC-01 FIX: uses a threading.Lock to prevent double-start race.
+        """
         if not self.connected:
             return
-        if hasattr(self, '_push_thread') and self._push_thread.isRunning():
-            return
+        if not self._config_push_lock.acquire(blocking=False):
+            return  # Already pushing — skip silently
         self._push_thread = QThread()
         self._push_worker = _ConfigPushWorker(self, mode="config")
         self._push_worker.moveToThread(self._push_thread)
@@ -278,6 +294,8 @@ class DeviceController(QObject):
         self._push_worker.finished.connect(self._push_thread.quit)
         self._push_worker.finished.connect(self._push_worker.deleteLater)
         self._push_thread.finished.connect(self._push_thread.deleteLater)
+        # Release the lock AFTER the thread has fully stopped
+        self._push_thread.finished.connect(lambda: self._config_push_lock.release())
         self._push_thread.start()
 
     def _push_atten_blocking(self) -> None:
@@ -288,11 +306,13 @@ class DeviceController(QObject):
         self._send_command(f"CMD_SET_ATTEN 1 {self.current_config.ch1_atten_idx}", wait_ack=True)
 
     def push_atten_to_device(self) -> None:
-        """Despacha el push de atenuación a un hilo worker."""
+        """Despacha el push de atenuación a un hilo worker.
+        PC-01 FIX: uses a threading.Lock to prevent double-start race.
+        """
         if not self.connected:
             return
-        if hasattr(self, '_atten_thread') and self._atten_thread.isRunning():
-            return
+        if not self._atten_push_lock.acquire(blocking=False):
+            return  # Already pushing — skip silently
         self._atten_thread = QThread()
         self._atten_worker = _ConfigPushWorker(self, mode="atten")
         self._atten_worker.moveToThread(self._atten_thread)
@@ -300,7 +320,26 @@ class DeviceController(QObject):
         self._atten_worker.finished.connect(self._atten_thread.quit)
         self._atten_worker.finished.connect(self._atten_worker.deleteLater)
         self._atten_thread.finished.connect(self._atten_thread.deleteLater)
+        self._atten_thread.finished.connect(lambda: self._atten_push_lock.release())
         self._atten_thread.start()
+
+    def push_pga_to_device(self) -> None:
+        """Despacha el push de configuración PGA a un hilo worker.
+        PC-04 FIX: replaces direct _push_pga_blocking() call on main thread.
+        """
+        if not self.connected:
+            return
+        if not self._pga_push_lock.acquire(blocking=False):
+            return  # Already pushing — skip silently
+        self._pga_thread = QThread()
+        self._pga_worker = _ConfigPushWorker(self, mode="pga")
+        self._pga_worker.moveToThread(self._pga_thread)
+        self._pga_thread.started.connect(self._pga_worker.run)
+        self._pga_worker.finished.connect(self._pga_thread.quit)
+        self._pga_worker.finished.connect(self._pga_worker.deleteLater)
+        self._pga_thread.finished.connect(self._pga_thread.deleteLater)
+        self._pga_thread.finished.connect(lambda: self._pga_push_lock.release())
+        self._pga_thread.start()
 
     # ------------------------------------------------------------------
     # Envio de comandos sincronizado
@@ -578,8 +617,10 @@ class DeviceController(QObject):
     def set_adc_correction(self, factor: float) -> bool:
         if factor < 1.0 or factor > 1.1:
             raise ValueError(f"Correction factor out of range: {factor}. Range: 1.0-1.1")
+        # PC-08 FIX: always update local config, even if not connected
+        self.current_config.adc_correction_factor = factor
+        self.config_changed.emit()
+        if not self.connected:
+            return True  # Saved locally; will be pushed on next connect
         ok, err = self._send_command(f"CMD_ADC_SET_CORRECTION {factor:.6f}")
-        if ok:
-            self.current_config.adc_correction_factor = factor
-            self.config_changed.emit()
         return ok

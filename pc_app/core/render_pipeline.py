@@ -103,10 +103,21 @@ class RenderPipeline:
         elif mode == 'average':
             a1 = self.data_store.get_average(4, 'ch0_mv')
             a2 = self.data_store.get_average(4, 'ch1_mv')
-            if a1 is not None and self._ac_state[0]['mode'] != 'DC':
-                a1 = self._apply_ac_coupling(a1, 0, rate)
-            if a2 is not None and self._ac_state[1]['mode'] != 'DC':
-                a2 = self._apply_ac_coupling(a2, 1, rate)
+            # PC-02 FIX: the EMA integrator was already updated in step 3 above.
+            # Subtract the stored dc_offset directly — do NOT call _apply_ac_coupling
+            # again, which would re-run the EMA and corrupt the DC level.
+            if a1 is not None:
+                dc0 = self._ac_state[0].get('dc_offset')
+                if self._ac_state[0]['mode'] == 'GND':
+                    a1 = np.zeros_like(a1)
+                elif dc0 is not None and self._ac_state[0]['mode'] != 'DC':
+                    a1 = a1 - dc0
+            if a2 is not None:
+                dc1 = self._ac_state[1].get('dc_offset')
+                if self._ac_state[1]['mode'] == 'GND':
+                    a2 = np.zeros_like(a2)
+                elif dc1 is not None and self._ac_state[1]['mode'] != 'DC':
+                    a2 = a2 - dc1
             waveform_widget.update_frame(t_indices, a1, a2, trigger_idx, rate)
         elif mode == 'envelope':
             e1 = self.data_store.get_envelope(4, 'ch0_mv')

@@ -416,14 +416,20 @@ class ControlsPanel(QDockWidget):
 
         self.layout.addWidget(grp_pga)
 
-        # --- ADC Correction Factor ---
+        # --- ADC Calibration Group ---
+        grp_adc_cal = QGroupBox("ADC Calibration")
+        l_adc_cal = QVBoxLayout(grp_adc_cal)
         row_corr = QHBoxLayout()
-        row_corr.addWidget(QLabel("ADC Corr:"))
+        row_corr.addWidget(QLabel("Corr Factor:"))
         self.spin_adc_corr = QDoubleSpinBox()
         self.spin_adc_corr.setRange(1.0, 1.1)
         self.spin_adc_corr.setDecimals(4)
         self.spin_adc_corr.setSingleStep(0.001)
         self.spin_adc_corr.setValue(1.037)
+        self.spin_adc_corr.setToolTip(
+            "Factor de correción para la no-linealidad del ADC en zona alta (12 dB).\n"
+            "1.0 = sin correción. 1.037 = valor típico ESP32-S3."
+        )
         row_corr.addWidget(self.spin_adc_corr)
         btn_set_corr = QPushButton("Set")
         btn_set_corr.clicked.connect(
@@ -432,7 +438,8 @@ class ControlsPanel(QDockWidget):
         self.lbl_adc_corr_status = QLabel("")
         self.lbl_adc_corr_status.setStyleSheet("color: #a1a1aa; font-size: 9px;")
         row_corr.addWidget(self.lbl_adc_corr_status)
-        self.layout.addLayout(row_corr)
+        l_adc_cal.addLayout(row_corr)
+        self.layout.addWidget(grp_adc_cal)
 
         # --- 9. Theme + Reload ---
         grp_theme = QGroupBox("App")
@@ -511,7 +518,8 @@ class ControlsPanel(QDockWidget):
         self.btn_theme_light.clicked.connect(lambda: self.theme_toggle_requested.emit('light'))
         self.btn_reload.clicked.connect(self.reload_requested.emit)
 
-        # Auto-refresh ports
+        # Auto-refresh ports — PC-06 FIX: timer is STOPPED while connected to avoid
+        # blocking the main thread with comports() enumeration every 2 s.
         self._port_timer = QTimer(self)
         self._port_timer.timeout.connect(self.refresh_ports_requested.emit)
         self._port_timer.start(2000)
@@ -595,6 +603,13 @@ class ControlsPanel(QDockWidget):
         self.btn_connect.setText("Disconnect" if connected else "Connect")
         if not connected:
             self.lbl_fw.setText("FW: Unknown")
+            # PC-06 FIX: restart port refresh timer when disconnected
+            if not self._port_timer.isActive():
+                self._port_timer.start(2000)
+        else:
+            # PC-06 FIX: stop port refresh timer while connected (avoids ~200ms
+            # blocking call to serial.tools.list_ports.comports() every 2 s)
+            self._port_timer.stop()
 
     def _on_gen_type_changed(self, index: int):
         # Index: 0=Square, 1=Sine, 2=Triangle, 3=Sawtooth
