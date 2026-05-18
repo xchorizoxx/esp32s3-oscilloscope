@@ -17,9 +17,11 @@ static const char *TAG = "osc_adc";
 /* --------------------------------------------------------------------------
  * Estado interno
  * -------------------------------------------------------------------------- */
-/* FW-01 FIX: volatile ensures the NULL write in osc_adc_stop() is visible
- * to osc_adc_read_mean_mv10() running on the other core without a stale register cache. */
-static volatile adc_continuous_handle_t s_adc_handle = NULL;
+/* FW-01 FIX: Cross-core visibility of the handle NULL assignment.
+ * Using __atomic_store_n / __atomic_load_n at the two critical sites
+ * (osc_adc_stop write, osc_adc_read_mean_mv10 read) avoids polluting every
+ * API call site with volatile casts. Plain declaration keeps types clean. */
+static adc_continuous_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_cali_handle[2] = {NULL, NULL};
 static volatile uint32_t s_overflow_count = 0;
 static TaskHandle_t s_notify_task = NULL;
@@ -161,7 +163,12 @@ esp_err_t osc_adc_init(void) {
               .flush_pool = true, // descartar datos viejos si el pool se llena
           },
   };
-  ESP_ERROR_CHECK(adc_continuous_new_handle(&handle_cfg, &s_adc_handle));
+  /* FW-01: use a local temp to satisfy adc_continuous_new_handle's type signature,
+   * then store atomically so other cores see the update immediately. */
+  adc_continuous_handle_t tmp_handle = NULL;
+  ESP_ERROR_CHECK(adc_continuous_new_handle(&handle_cfg, &tmp_handle));
+  /* FW-01: store via atomic so other cores see the update immediately. */
+  __atomic_store_n(&s_adc_handle, tmp_handle, __ATOMIC_RELEASE);
 
   // --- Patrón de canales ---
   // Mapeo de osc_atten_t → adc_atten_t (valores idénticos en ESP-IDF)
@@ -247,10 +254,12 @@ esp_err_t osc_adc_stop(void) {
     return ESP_OK;
 
   adc_continuous_stop(s_adc_handle);
-  /* FW-05 FIX: adc_continuous_deinit() is deprecated in ESP-IDF v5+.
-   * Use adc_continuous_del_handle() instead. */
-  adc_continuous_del_handle(s_adc_handle);
-  s_adc_handle = NULL;
+  /* FW-05: adc_continuous_del_handle() does not exist in ESP-IDF v6.0.
+   * adc_continuous_deinit() is the correct deinit API for this version. */
+  adc_continuous_deinit(s_adc_handle);
+  /* FW-01: atomic NULL store — osc_adc_read_mean_mv10 on the other core
+   * will see NULL and return early without touching freed resources. */
+  __atomic_store_n(&s_adc_handle, (adc_continuous_handle_t)NULL, __ATOMIC_RELEASE);
   s_notify_task = NULL;
 
   for (int i = 0; i < 2; i++) {
@@ -409,7 +418,9 @@ esp_err_t osc_adc_read_samples(osc_sample_t *buf, size_t max_count,
 /* -------------------------------------------------------------------------- */
 int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms)
 {
-    if (!s_adc_handle) return 14500;
+    /* FW-01: load via atomic so we always see the latest value written by
+     * osc_adc_stop() on the other core, even if it ran concurrently. */
+    if (__atomic_load_n(&s_adc_handle, __ATOMIC_ACQUIRE) == NULL) return 14500;
     if (ch_idx > 1) ch_idx = 0;
 
     uint8_t target_ch = (ch_idx == 0) ? 0 : 1;
