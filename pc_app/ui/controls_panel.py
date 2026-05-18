@@ -374,18 +374,10 @@ class ControlsPanel(QDockWidget):
         row_pga_step = QHBoxLayout()
         row_pga_step.addWidget(QLabel("Gain:"))
         self.cb_pga_step = QComboBox()
-        pga_steps = [
-            ("x1.00 (paso 0)", 0),
-            ("x2.00 (paso 1)", 1),
-            ("x4.96 (paso 2)", 2),
-            ("x9.96 (paso 3)", 3),
-            ("x5.96 (paso 4)", 4),
-            ("x10.96 (paso 5)", 5),
-            ("x13.92 (paso 6)", 6),
-            ("x14.92 (paso 7)", 7),
-        ]
-        for label, val in pga_steps:
-            self.cb_pga_step.addItem(label, val)
+        # PGA-B06 FIX: Use generic labels; update_pga_info() will replace them
+        # with actual nominal gains once firmware responds (or stays generic offline).
+        for i in range(8):
+            self.cb_pga_step.addItem(f"Step {i}", i)
         self.cb_pga_step.setEnabled(False)
         row_pga_step.addWidget(self.cb_pga_step)
         l_pga.addLayout(row_pga_step)
@@ -406,8 +398,10 @@ class ControlsPanel(QDockWidget):
         self.lbl_pga_gain_now.setStyleSheet("color: #a1a1aa; font-size: 10px;")
         l_pga.addWidget(self.lbl_pga_gain_now)
 
+        # PGA-B01 FIX: button always enabled — the dialog itself handles offline
+        # gracefully, so there is no reason to block access to it.
         self.btn_pga_cal = QPushButton("Calibrate PGA...")
-        self.btn_pga_cal.setEnabled(False)
+        self.btn_pga_cal.setEnabled(True)
         l_pga.addWidget(self.btn_pga_cal)
 
         self.lbl_pga_status = QLabel("")
@@ -505,7 +499,8 @@ class ControlsPanel(QDockWidget):
 
         # PGA
         self.chk_pga_enable.toggled.connect(self.pga_enabled_changed.emit)
-        self.chk_pga_enable.toggled.connect(self.cb_pga_step.setEnabled)
+        # PGA-B07 FIX: removed direct chk->cb_pga_step.setEnabled connection.
+        # main_window._on_pga_enabled_changed() is the single authority.
         self.cb_pga_step.currentIndexChanged.connect(
             lambda i: self.pga_step_changed.emit(self.cb_pga_step.itemData(i)))
         self.btn_pga_cal.clicked.connect(self.pga_cal_requested.emit)
@@ -606,10 +601,27 @@ class ControlsPanel(QDockWidget):
             # PC-06 FIX: restart port refresh timer when disconnected
             if not self._port_timer.isActive():
                 self._port_timer.start(2000)
+            # PGA-B05 FIX: reset PGA panel to avoid showing stale device data
+            self._reset_pga_panel()
         else:
             # PC-06 FIX: stop port refresh timer while connected (avoids ~200ms
             # blocking call to serial.tools.list_ports.comports() every 2 s)
             self._port_timer.stop()
+
+    def _reset_pga_panel(self):
+        """PGA-B05 FIX: Reset all PGA labels and combo to default state on disconnect."""
+        self.lbl_pga_bw.setText("BW: -- Hz")
+        self.lbl_pga_bw.setStyleSheet("color: #a1a1aa; font-size: 10px;")
+        self.lbl_pga_vg.setText("VG: -- mV")
+        self.lbl_pga_div.setText("Div: --")
+        self.lbl_pga_gain_now.setText("Gain: x--")
+        self.lbl_pga_status.setText("(sin dispositivo)")
+        self.lbl_pga_status.setStyleSheet("color: #71717a; font-size: 10px;")
+        # Reset combo to generic labels
+        self.cb_pga_step.blockSignals(True)
+        for i in range(8):
+            self.cb_pga_step.setItemText(i, f"Step {i}")
+        self.cb_pga_step.blockSignals(False)
 
     def _on_gen_type_changed(self, index: int):
         # Index: 0=Square, 1=Sine, 2=Triangle, 3=Sawtooth

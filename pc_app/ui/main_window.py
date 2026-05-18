@@ -281,6 +281,16 @@ class MainWindow(QMainWindow):
         bw = cfg.pga_bw_hz[cfg.pga_step] if cfg.pga_step < len(cfg.pga_bw_hz) else 1000000.0
         self.meas_panel.update_pga_display(gain, bw)
 
+        # PGA-B08 FIX: _on_pga_info_received was NOT propagating changes to the
+        # render pipeline or waveform widget, causing stale gains after firmware
+        # autonomously changes PGA state (e.g. after auto-calibration).
+        self.waveform_widget.set_pga_params(
+            enabled=cfg.pga_enabled, step=cfg.pga_step, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        self.render_pipeline.set_pga_params(
+            enabled=cfg.pga_enabled, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+
     def _on_pga_enabled_changed(self, enabled: bool):
         # PC-03 FIX: always update local config + pipeline state, even when offline.
         # This ensures waveform_widget and render_pipeline stay consistent.
@@ -302,10 +312,22 @@ class MainWindow(QMainWindow):
             self.controller.pga_get_info()
 
     def _on_pga_step_changed(self, step: int):
-        if not self.controller.connected:
-            return
-        self.controller.set_pga_step(step)
+        """PGA-B02 FIX: always update local config + pipeline, even when offline."""
         cfg = self.controller.current_config
+        cfg.pga_step = step  # Update local config unconditionally
+
+        gain   = cfg.pga_gain_eff[step]   if step < len(cfg.pga_gain_eff)   else 1.0
+        offset = cfg.pga_offset_cal[step] if step < len(cfg.pga_offset_cal) else 0.0
+        bw     = cfg.pga_bw_hz[step]      if step < len(cfg.pga_bw_hz)      else 1000000.0
+
+        # Always update pipeline + UI
+        self.waveform_widget.set_pga_params(
+            enabled=cfg.pga_enabled, step=step, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        self.render_pipeline.set_pga_params(
+            enabled=cfg.pga_enabled, vg_mv=cfg.pga_vg_mv,
+            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
+        self.meas_panel.update_pga_display(gain, bw)
         self.controls_panel.update_pga_info({
             'step': step,
             'gain_eff': cfg.pga_gain_eff,
@@ -316,16 +338,10 @@ class MainWindow(QMainWindow):
             'calibrated': cfg.pga_calibrated,
             'enabled': cfg.pga_enabled,
         })
-        gain = cfg.pga_gain_eff[step] if step < len(cfg.pga_gain_eff) else 1.0
-        offset = cfg.pga_offset_cal[step] if step < len(cfg.pga_offset_cal) else 0.0
-        self.waveform_widget.set_pga_params(
-            enabled=cfg.pga_enabled, step=step, vg_mv=cfg.pga_vg_mv,
-            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
-        self.render_pipeline.set_pga_params(
-            enabled=cfg.pga_enabled, vg_mv=cfg.pga_vg_mv,
-            gain_eff=gain, offset_mv=offset, div_ratio=cfg.pga_div_ratio)
-        bw = cfg.pga_bw_hz[step] if step < len(cfg.pga_bw_hz) else 1000000.0
-        self.meas_panel.update_pga_display(gain, bw)
+
+        if not self.controller.connected:
+            return  # Local state updated; firmware push deferred to next connect
+        self.controller.set_pga_step(step)
 
     def _on_pga_cal_requested(self):
         dialog = PgaCalDialog(self.controller, self)
