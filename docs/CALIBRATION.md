@@ -1,53 +1,119 @@
-# Guía de Calibración y Ajustes Técnicos
+# Analog Front-End & Calibration Reference Manual
 
-Este documento detalla los factores de corrección y calibración implementados tanto en el firmware (ESP32-S3) como en la aplicación de PC.
-
-## 1. Calibración del ADC (Firmware)
-
-El ESP32-S3 utiliza un ADC de aproximaciones sucesivas (SAR) que tiene variaciones de fabricación. Se utilizan tres niveles de calibración:
-
-### A. Calibración por eFuse (IDF Standard)
-El firmware utiliza la librería `esp_adc/adc_cali.h` con el esquema `curve_fitting`. 
-- **Funcionamiento**: Lee los valores de referencia grabados en el chip durante la fabricación para compensar el error de ganancia y el offset.
-- **Ubicación**: `components/osc_adc/osc_adc.c` -> `osc_adc_init()`.
-
-### B. Corrección por Saturación (Manual)
-Debido a que el ADC a 12dB de atenuación pierde linealidad drásticamente por encima de los 2500mV, se ha implementado un factor de corrección no-lineal.
-- **Factor**: `1.037x` (Calculado comparando 3.268V medidos por multímetro vs 3.15V leídos por el ADC).
-- **Lógica**: Solo se aplica si el voltaje calculado supera los `2500mV`.
-- **Macros en `osc_adc.c`**:
-  ```c
-  #define OSC_ADC_CORRECTION_FACTOR  1.037f
-  #define OSC_ADC_SATURATION_MV      2500
-  ```
-- **Nota**: Si en el futuro se añade un divisor de voltaje físico (ej. 1/10), este factor debe revisarse o eliminarse si la señal de entrada al pin se mantiene siempre por debajo de 2500mV.
-
-## 2. Procesamiento de Señal (Firmware)
-
-### Decimación por Promedio
-Para escalas de tiempo lentas (alto T/div), el firmware realiza una decimación.
-- **Antes**: Subsampling (saltar muestras). Causaba aliasing y ruido.
-- **Ahora**: Averaging (acumulación y división). Actúa como un filtro paso-bajo que suaviza la señal y mejora la precisión aparente.
-- **Ubicación**: `osc_adc.c` -> `adc_capture_task()`.
-
-## 3. Ajustes en la App (PC)
-
-### A. Digital AC Coupling
-El acoplamiento AC se realiza mediante un filtro EMA (Exponential Moving Average) que resta la componente DC en tiempo real.
-- **Ubicación**: `pc_app/ui/main_window.py` -> `_apply_ac_coupling()`.
-
-### B. PGA Gain y Vertical Offset
-La App permite aplicar una ganancia digital (zoom) y un offset vertical para facilitar la visualización.
-- **PGA**: Multiplicador digital sobre los valores en mV.
-- **Offset**: Suma/resta de valores en mV antes del renderizado.
-- **Ubicación**: `pc_app/ui/waveform_widget.py`.
-
-## 4. Sincronismo (Trigger)
-
-### Histéresis Digital
-Para evitar disparos falsos por ruido, el trigger tiene una ventana de histéresis de **±50mV**.
-- **Lógica**: La señal debe cruzar el nivel de trigger Y haber estado previamente por fuera de la banda de histéresis.
-- **Ubicación**: `components/osc_trigger/osc_trigger.c`.
+This document provides a comprehensive technical breakdown of the analog frontend, active Programmable Gain Amplifier (PGA), mathematical scaling models, and the calibration routines implemented in the firmware and PC application.
 
 ---
-*Última actualización: 26 de Abril, 2026*
+
+## 🔍 1. Analog Front-End Topology
+
+To handle wide voltage sweeps while optimizing resolution, the input stage consists of a passive attenuator followed by an active non-inverting Programmable Gain Amplifier (PGA).
+
+### Electronic Diagram
+
+```
+Analog Input (Vin) ──► [Input Divider (Div)] ──► Op-Amp Non-Inverting (+) Input
+                                                    ┌───────────────┐
+                                                 ┌──┤ -           V+├─► +3.3V
+                                                 │  │               │
+                                 Virtual Ground ─┴──┤ +         Vout├─► To ADC1_CH0
+                                 (VG Bias Board)    │ -Vee          │
+                                                    └───────┬───────┘
+                                                            │
+                                                            ├───► Feedback Resistor Rf (36kΩ)
+                                                            │
+                                                            ▼  Gain Switches (GPIO-driven)
+                                                       ┌────┴────┐
+                                                       ├─►[S0]───┼──► R1 (36kΩ)  [GPIO39]
+                                                       ├─►[S1]───┼──► R2 (9.09kΩ)[GPIO40]
+                                                       └─►[S2]───┼──► R3 (4.02kΩ)[GPIO41]
+                                                                 │
+                                                                 ▼
+                                                            Virtual Ground (VG)
+```
+
+### Digital Control Matrix (8 Gain Steps)
+
+The gain of the PGA is selected by controlling the states of three open-drain or push-pull switches ($S_0, S_1, S_2$) connected to the resistors $R_1, R_2, R_3$ leading to the Virtual Ground reference.
+
+| Step | $S_2$ (GPIO41) | $S_1$ (GPIO40) | $S_0$ (GPIO39) | Equivalent Gain Resistor ($R_{eq}$) | Nominal Gain Factor |
+|:---:|:---:|:---:|:---:|:---|:---:|
+| **0** | Open | Open | Open | $\infty$ (No path to VG) | **x1.00** |
+| **1** | Open | Open | Closed | $R_1 + R_{on}$ | **x2.00** |
+| **2** | Open | Closed | Open | $R_2 + R_{on}$ | **x4.96** |
+| **3** | Open | Closed | Closed | $(R_1 + R_{on}) \parallel (R_2 + R_{on})$ | **x5.96** |
+| **4** | Closed | Open | Open | $R_3 + R_{on}$ | **x9.96** |
+| **5** | Closed | Open | Closed | $(R_1 + R_{on}) \parallel (R_3 + R_{on})$ | **x10.96** |
+| **6** | Closed | Closed | Open | $(R_2 + R_{on}) \parallel (R_3 + R_{on})$ | **x13.92** |
+| **7** | Closed | Closed | Closed | $(R_1 + R_{on}) \parallel (R_2 + R_{on}) \parallel (R_3 + R_{on})$ | **x14.92** |
+
+---
+
+## 🧮 2. Mathematical Transfer Function
+
+The voltage read by the ESP32-S3's internal 12-bit SAR ADC ($V_{adc}$) is governed by the following system equation:
+
+$$V_{adc} = VG + \left[ (V_{in} \cdot Div) - VG \right] \cdot G_{nominal} \cdot GainTrim$$
+
+Where:
+- $V_{in}$: Raw input signal voltage at the oscilloscope probe.
+- $Div$: Attenuation ratio of the passive input voltage divider (default: $\approx 0.0909$ for a 1/11 divider).
+- $VG$: Virtual Ground offset voltage (typically set to $1650.0\text{ mV}$ to offset bidirectional AC signals into the ADC's safe $0 - 3.3\text{ V}$ window).
+- $G_{nominal}$: The theoretical non-inverting gain determined by the feedback network:
+
+$$G_{nominal} = 1 + \frac{R_f}{R_{eq}}$$
+
+- $GainTrim$: Fine calibration software multiplier applied dynamically.
+
+### Accounting for Switch On-Resistance ($R_{on}$)
+
+GPIO internal hardware switches inside the ESP32-S3 have a parasitic drain-source on-resistance $R_{on}$ (typically $\approx 50.0\ \Omega$ at $3.3\text{ V}$). This parasitic resistance is accounted for by the software model to prevent gain compression at high gain factors:
+
+$$R_{eq, i} = R_{nom, i} + R_{on}$$
+
+---
+
+## ⚙️ 3. PGA Calibration Routines
+
+To guarantee absolute voltage readings on the GUI, two calibration parameters are loaded per gain step: **Gain Trim** and **Offset Calibration (mV)**.
+
+### A. Automatic Auto-Calibration
+The PC client coordinates an automated auto-calibration sequence. **Before running, the analog inputs must be connected to signal ground (0 V).**
+
+1. **Virtual Ground Sweep**: The firmware measures the quiescent voltage on the channel to isolate $VG$.
+2. **Step Verification**: The firmware steps through all 8 PGA combinations.
+3. **Offset Calculation**: Since $V_{in} = 0\text{ V}$, any deviation from the expected $VG$ value at step $i$ is calculated as the active offset:
+
+$$\text{Offset}_{cal}[i] = V_{adc, raw}[i] - VG$$
+
+4. **NVS Serialization**: Once completed, the firmware commits the computed offset maps and fine calibration values permanently to Non-Volatile Storage (NVS).
+
+---
+
+## 📈 4. Internal SAR ADC Calibration
+
+The ESP32-S3 internal analog-to-digital converter has non-linearities, particularly in the lower ($<100\text{ mV}$) and upper ($>2500\text{ mV}$) regions of the curve at 12 dB attenuation.
+
+```mermaid
+graph LR
+    Raw[Raw 12-bit counts] --> EFuse[eFuse Curve Fitting]
+    EFuse --> Uniform[Uniform Correction Factor]
+    Uniform --> Out[Calibrated Millivolts * 10]
+```
+
+### A. eFuse Curve Fitting (ESP-IDF API)
+At startup, `osc_adc_init()` registers a calibration handle utilizing the chip's internal eFuse calibration table:
+- Compensates for individual reference voltage ($V_{ref}$) deviations recorded at the factory.
+- Uses `adc_cali_raw_to_voltage()` from the `esp_adc/adc_cali_scheme.h` framework.
+
+### B. Uniform Non-Linearity Correction (Dynamic)
+To linearize the upper region of the ADC scale without introducing signal transitions or voltage jumps, a runtime-tunable global correction multiplier is applied uniformly across the entire input range of the channel:
+
+```c
+// Applied during raw ADC data conversion to mV in osc_adc.c
+if (s_current_atten[ch_idx] == 3 && s_adc_correction_factor != 1.0f) {
+    voltage_mv = (int)(voltage_mv * s_adc_correction_factor);
+}
+```
+
+- **Default Factor**: `1.037f` (compels a raw reading of $3.15\text{ V}$ to register at its true $3.268\text{ V}$ level).
+- **Run-time Safety**: Handled in-place inside `raw_to_mv10()`. Updated dynamically via `CMD_ADC_SET_CORRECTION` using thread-safe atomic writes without interrupting the DMA controller.

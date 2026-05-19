@@ -1,89 +1,79 @@
-# Pin Mapping
+# Hardware Interface & Pin Mapping Reference
 
-## ESP32-S3-DevKitC-1 (N8R8 / N16R8)
-
-### Signal Pins
-
-| GPIO | Direction | Signal | Voltage | Notes |
-|------|-----------|--------|---------|-------|
-| **1** | Input | ADC CH0 (oscilloscope CH1) | 0–2500 mV | ADC1_CH0, 12-bit SAR |
-| **2** | Input | ADC CH1 (oscilloscope CH2) | 0–2500 mV | ADC1_CH1, only in DUAL mode |
-| **3** | Output | Test signal 1 kHz | 0/3.3 V | LEDC PWM, 50% duty, for self-test |
-| **48** | Output | Status LED | 3.3 V | ON when USB streaming active |
-
-### USB OTG (Native — physical "USB" connector)
-
-| GPIO | Signal | Notes |
-|------|--------|-------|
-| **19** | USB D− | Connected internally to USB-C "USB" port |
-| **20** | USB D+ | Connected internally to USB-C "USB" port |
-
-> These pins are **not broken out** on most DevKits — they go directly to the USB-C connector labeled **"USB"**. Do not use GPIO19/20 for anything else.
-
-### UART (Debug Monitor — physical "UART" connector)
-
-| GPIO | Signal | Notes |
-|------|--------|-------|
-| **43** | UART0 TX | USB-C "UART" port (CH340/CP2102 bridge) |
-| **44** | UART0 RX | USB-C "UART" port |
+This document outlines the pin configurations, strapping constraints, voltage limits, and diagnostic loop setups for the ESP32-S3 Digital Oscilloscope.
 
 ---
 
-## USB Connectivity
+## 📌 1. Pin Configuration Table
 
-The ESP32-S3-DevKitC-1 has **two USB-C ports**:
+These mappings are designed and validated on the **ESP32-S3-DevKitC-1** board (N8R8 / N16R8 variants).
 
-| Port Label | Chip | Linux Device | Purpose |
-|------------|------|--------------|---------|
-| **UART** | QinHeng CH340 (VID `0x1A86`) | `/dev/ttyACM0` | Flash firmware, serial monitor |
-| **USB** | ESP32-S3 native USB OTG (VID `0x303A`) | `/dev/ttyACM1` | Oscilloscope data stream (CDC-ACM) |
-
-Both can be connected simultaneously. The firmware requires the USB cable in the **"USB"** port to stream data.
-
----
-
-## ADC Input Specifications
-
-| Parameter | Value |
-|-----------|-------|
-| ADC resolution | 12-bit (0–4095 counts) |
-| Reference | Internal, ~1.1 V |
-| Attenuation (default 12 dB) | 0–2500 mV input range |
-| Max safe input | 3.3 V (ADC input rail) |
-| Absolute max | 3.6 V |
-| Input impedance | ~200 kΩ (no external buffer) |
-| Calibration | `curve_fitting` (ESP-IDF ADC calibration API) |
-
-> ⚠️ **The ESP32-S3 ADC is single-ended, referenced to GND.** It cannot measure negative voltages. For AC signals, add a DC bias (e.g., 1.25 V divider).
+| Pin (GPIO) | Direction | Signal Identifier | Voltage Range | Hardware & Firmware Description |
+|:---:|:---:|:---|:---:|:---|
+| **GPIO1** | Input | ADC CH0 (Scope CH1) | $0.0 - 2.5\text{ V}$ | ADC1_CH0. Direct channel A input. Input protected. |
+| **GPIO2** | Input | ADC CH1 (Scope CH2) | $0.0 - 2.5\text{ V}$ | ADC1_CH1. Direct channel B input. Active in dual mode. |
+| **GPIO3** | Output | Built-in Test Signal | $0.0 / 3.3\text{ V}$ | LEDC hardware PWM generator. Outputs 1 kHz square-wave. |
+| **GPIO48** | Output | Status Indicator LED | $0.0 / 3.3\text{ V}$ | Onboard RGB/LED. Driven HIGH when active streaming is enabled. |
+| **GPIO19** | Native | Native USB D− | Differential | Internally routed to physical **"USB"** connector (Native OTG). |
+| **GPIO20** | Native | Native USB D+ | Differential | Internally routed to physical **"USB"** connector (Native OTG). |
+| **GPIO43** | Serial | UART Console TX | $3.3\text{ V}$ | Routed to CH340 / CP210x bridge on **"UART"** physical connector. |
+| **GPIO44** | Serial | UART Console RX | $3.3\text{ V}$ | Routed to CH340 / CP210x bridge on **"UART"** physical connector. |
+| **GPIO39** | Output | PGA Control Bit 0 | $0.0 / 3.3\text{ V}$ | Controls switch $S_0$ for resistor $R_1$ in active PGA feedback. |
+| **GPIO40** | Output | PGA Control Bit 1 | $0.0 / 3.3\text{ V}$ | Controls switch $S_1$ for resistor $R_2$ in active PGA feedback. |
+| **GPIO41** | Output | PGA Control Bit 2 | $0.0 / 3.3\text{ V}$ | Controls switch $S_2$ for resistor $R_3$ in active PGA feedback. |
 
 ---
 
-## Strapping Pins (Avoid)
+## ⚡ 2. ADC Electrical Specifications & Protections
 
-These ESP32-S3 pins affect boot mode — do not drive them at power-on:
+> [!WARNING]
+> **Voltage Constraint Alert**: The ESP32-S3 internal SAR ADC is single-ended and referenced directly to **Signal Ground (GND)**.
+> - **Input Range Limit**: The absolute maximum analog input voltage is **$3.3\text{ V}$**. Do not exceed **$3.6\text{ V}$** under any circumstance to prevent permanent hardware damage to the silicon rail.
+> - **ADC Linearity Limit**: Although the rail handles up to $3.3\text{ V}$, the ADC output response begins compressing above **$2.5\text{ V}$** when using the $12\text{ dB}$ attenuator scheme.
 
-| GPIO | Boot Function |
-|------|--------------|
-| 0 | Download mode if pulled LOW |
-| 3 | JTAG if pulled LOW (used here as test output — safe, driven by firmware after boot) |
-| 45 | VDD_SPI voltage select |
-| 46 | ROM messages on/off |
+### Signal Conditioning Best Practices
+- **For Bipolar AC Signals**: The input signal must be shifted into the positive voltage domain by applying a DC offset (Virtual Ground) of $1.65\text{ V}$ using an active buffer or resistor divider.
+- **For High Voltages**: Use a 10:1 passive divider (e.g., $900\text{ k}\Omega$ series resistor with $100\text{ k}\Omega$ shunt to ground) to measure up to $25\text{ V}$ safely.
 
 ---
 
-## Connections Diagram
+## ⚠️ 3. Boot Strapping Pins
+
+The ESP32-S3 monitors specific pins during the rising edge of the reset signal to determine the boot mode. Keep these restrictions in mind:
+
+1. **GPIO0 (Boot Pin)**: Must **not** be held LOW during a power-on reset or hardware restart, as this forces the system into the ROM Serial Download Mode (UART flashing).
+2. **GPIO3**: Used as the diagnostic test signal generator. While safe once booted, ensure no external low-impedance load pulls this pin hard LOW during boot.
+3. **GPIO45**: Controls the default flash/PSRAM voltage select LDO ($1.8\text{ V}$ vs $3.3\text{ V}$). Keep open/pulled-down.
+4. **GPIO46**: Monitored by the ROM bootloader to enable or disable console print statements during initial ROM startup.
+
+---
+
+## 🔌 4. Cable Connectivity Guide
+
+To fully operate the oscilloscope, connect **two USB cables** to your host workstation:
 
 ```
-Host PC
-  │
-  ├── USB-C "UART" ──► CH340 ──► GPIO43/44 (flash & monitor, /dev/ttyACM0)
-  │
-  └── USB-C "USB"  ──► GPIO19/20 (oscilloscope CDC stream, /dev/ttyACM1)
-
-Signal Source
-  │
-  ├── CH1 ──► GPIO1 (via 1:1 probe or resistive divider)
-  └── CH2 ──► GPIO2 (optional, dual-channel mode only)
-
-GPIO3 ──► Test output 1 kHz, loop to GPIO1 for self-test
+                      ┌─────────────────────────────────┐
+                      │            Host PC              │
+                      └────┬────────────────────────┬───┘
+                           │                        │
+               [USB-C Console Cable]      [USB-C High-Speed Cable]
+                           │                        │
+                           ▼                        ▼
+                      ┌──────────┐              ┌──────────┐
+                      │  "UART"  │              │  "USB"   │
+                      └────┬─────┘              └────┬─────┘
+                           │ (COM Port /dev/ttyACM0)│ (COM Port /dev/ttyACM1)
+                           │                        │
+                           ▼                        ▼
+                      ┌─────────────────────────────────┐
+                      │    ESP32-S3-DevKitC-1 Board     │
+                      └─────────────────────────────────┘
 ```
+
+1. **Physical "UART" Port**:
+   - Interfaces through an onboard USB-to-UART bridge.
+   - Provides flashing capability (`idf.py flash`), low-level boot diagnostics, and the persistent FreeRTOS console monitor.
+2. **Physical "USB" Port**:
+   - Connects directly to the ESP32-S3 internal OTG transceiver.
+   - Handles the custom binary stream (12 Mbps Bulk endpoints) when streaming is active, and receives real-time control parameters.

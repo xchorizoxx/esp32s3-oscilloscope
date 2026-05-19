@@ -1,236 +1,143 @@
-# Communication Protocol
+# Binary Communication Protocol Specification
 
-## Transport
-
-- **Physical**: USB CDC-ACM over ESP32-S3 native USB OTG (GPIO19/20)
-- **USB VID/PID**: `0x303A` / `0x4001` (Espressif default)
-- **Baud rate**: irrelevant (USB bulk transfers, 115200 is nominal only)
-- **Connection detected**: via `DTR || RTS` line state change
+This document details the low-overhead binary framing protocol used to transmit real-time waveform data, measurements, and Programmable Gain Amplifier (PGA) status parameters from the ESP32-S3 firmware to the PyQt6 PC host application.
 
 ---
 
-## Frame Structure
+## 🛰️ 1. Frame Structure & Serialization
 
-All binary frames share a common prefix:
+All communication over the USB CDC-ACM link uses a structured packet architecture. Every frame begins with a **two-byte synchronization pattern**, followed by a **packet type**, **flags**, **sequence headers**, and ends with a **Dallas/Maxim CRC-8 checksum**.
+
+### General Frame Envelope
 
 ```
-[SYNC1: 0xAA] [SYNC2: 0x55] [FRAME_TYPE: 1 byte] [...payload...] [CRC8: 1 byte]
+┌───────────────┬───────────────┬───────────────┬───────────────┬───────────────────────────┬───────────────┐
+│  SYNC1 (0x55) │  SYNC2 (0xAA) │  Frame Type   │     Flags     │          Payload          │  Dallas CRC8  │
+│    (1 byte)   │    (1 byte)   │   (1 byte)    │   (1 byte)    │        (N bytes)          │   (1 byte)    │
+└───────────────┴───────────────┴───────────────┴───────────────┴───────────────────────────┴───────────────┘
 ```
 
-**CRC-8** is computed over **all bytes** including `SYNC1`, `SYNC2`, and `FRAME_TYPE`, using the lookup table hardcoded in `osc_usb.c` (CRC-8/MAXIM-DOW variant).
-
-> ⚠️ Do NOT generate the table from poly `0x31` with the standard algorithm — the table does not match. Use the hardcoded table directly (see `tools/test_interface.py`).
+- **SYNC1 / SYNC2**: Standard preamble sequence (`0x55`, `0xAA`) to align stream readers.
+- **Frame Type**: Identifies the payload layout (see Section 2).
+- **Flags**: Bitmask carrying operational states (e.g., channel validation, trigger markers, overflows).
+- **CRC-8 Checksum**: Standard Dallas/Maxim CRC-8 calculated over all preceding bytes in the packet.
 
 ---
 
-## Frame Types
+## 📦 2. Packet Definitions & Payloads
 
-| Byte | Name | Direction | Description |
-|------|------|-----------|-------------|
-| `0x01` | DATA | ESP32 → PC | ADC sample data frame |
-| `0x02` | MEASUREMENTS | ESP32 → PC | Automatic measurements |
-| `0x03` | ACK | ESP32 → PC | Command accepted |
-| `0x04` | NAK | ESP32 → PC | Command rejected |
-| `0x05` | INFO | ESP32 → PC | Device capabilities |
-| `0x06` | FFT | ESP32 → PC | FFT magnitude data |
-| `0x07` | HEARTBEAT | ESP32 → PC | 1 Hz keep-alive |
-| `0x08` | PGA_INFO | ESP32 → PC | PGA calibration and hardware info |
+### A. Data Frame (`0x01`)
+Transmits high-speed captured raw wave samples and, optionally, real-time spectral FFT data.
 
----
+*   **Flags Bitmask**:
+    - `0x01`: Channel 0 (CH1) data valid.
+    - `0x02`: Channel 1 (CH2) data valid.
+    - `0x04`: Hardware trigger occurred during this acquisition.
+    - `0x08`: DMA FIFO overflow occurred during capture.
+    - `0x10`: Real-time FFT spectral payload is attached.
 
-## Frame Layouts
+#### Header Layout (16 Bytes)
 
-### DATA Frame (`0x01`)
+| Offset | Byte Count | Data Type | Field Name | Description |
+|:---:|:---:|:---:|:---|:---|
+| `0` | `1` | `uint8` | `SYNC1` | `0x55` |
+| `1` | `1` | `uint8` | `SYNC2` | `0xAA` |
+| `2` | `1` | `uint8` | `type` | `0x01` (Data Frame) |
+| `3` | `1` | `uint8` | `flags` | Active channel & state bitmask |
+| `4` | `2` | `uint16` | `seq_num` | Frame sequence number (increments monotonically) |
+| `6` | `2` | `uint16` | `samples` | Number of samples ($S$) per channel in the payload |
+| `8` | `4` | `uint32` | `timestamp`| System time of the first sample in microseconds |
+| `12`| `4` | `uint32` | `trig_idx` | Index of the triggered sample inside the frame |
 
-```
-Offset  Size  Field
-──────  ────  ─────────────────────────────────────────────────────
-0       1     SYNC1 = 0xAA
-1       1     SYNC2 = 0x55
-2       1     FRAME_TYPE = 0x01
-3       1     FLAGS (see below)
-4       2     SEQ_NUM (uint16 LE, wraps at 65535)
-6       2     SAMPLE_COUNT (uint16 LE, samples per channel)
-8       4     TIMESTAMP_US (uint32 LE, µs since boot)
-12      4     TRIGGER_INDEX (uint32 LE, sample index of trigger event)
-16      N*2   CH0_DATA (int16 LE array, N = SAMPLE_COUNT, units: mV×10)
-16+N*2  N*2   CH1_DATA (int16 LE, only if CH1_VALID=1)
-end     1     CRC8
-```
+#### Payload Layout
 
-**FLAGS byte:**
+- **Channel 0 Data Block**: $S \times \text{int16}$ array in millivolts multiplied by 10 (resolution: $0.1\text{ mV}$).
+- **Channel 1 Data Block** *(Only if dual flags `0x02` is active)*: $S \times \text{int16}$ array.
+- **FFT Spectral Block** *(Only if FFT flags `0x10` is active)*:
+  - `uint16` (`fft_points`): Number of spectral points ($F$).
+  - `float32` (`bin_width_hz`): Frequency step size of each spectral bin in Hz.
+  - $F \times \text{float32}$ array: Spectral magnitude values.
 
-| Bit | Mask | Name | Meaning |
-|-----|------|------|---------|
-| 0 | `0x01` | CH0_VALID | CH0 data present |
-| 1 | `0x02` | CH1_VALID | CH1 data present (dual mode) |
-| 2 | `0x04` | TRIGGER_HIT | Trigger event was detected |
-| 3 | `0x08` | OVERFLOW | DMA ring buffer overflowed |
-| 4 | `0x10` | FFT_ATTACHED | FFT frame immediately follows |
-
-**Sample encoding:** `int16` in units of **mV×10**. To convert: `voltage_mV = sample / 10.0`. Range: −3276.8 mV to +3276.7 mV.
+- **Trailing Checksum**: `uint8` Dallas/Maxim CRC-8.
 
 ---
 
-### MEASUREMENTS Frame (`0x02`)
+### B. Measurements Frame (`0x02`)
+Transmits computed electrical parameters to the host PC application every 10 frames to avoid flooding the interface.
 
-```
-Offset  Size  Field
-──────  ────  ─────────────────────────────────────────────────
-0       1     SYNC1 = 0xAA
-1       1     SYNC2 = 0x55
-2       1     FRAME_TYPE = 0x02
-3       1     FLAGS (same as DATA frame)
-4       45    CH0 measurements (see below)
-49      45    CH1 measurements (only if CH1_VALID=1)
-end     1     CRC8
-```
+*   **Flags Bitmask**:
+    - `0x01`: Channel 0 (CH1) measurements valid.
+    - `0x02`: Channel 1 (CH2) measurements valid.
 
-**Measurements block (45 bytes, per channel):**
+#### Struct Layout (Channel 0 & Channel 1 Serialized Consecutively)
 
-```
-Offset  Size  Field         Units
-──────  ────  ────────────  ──────────────────
-0       4     vpp_mv        float32 LE, mV
-4       4     vrms_mv       float32 LE, mV
-8       4     vdc_mv        float32 LE, mV
-12      4     vac_rms_mv    float32 LE, mV
-16      4     vmax_mv       float32 LE, mV
-20      4     vmin_mv       float32 LE, mV
-24      4     freq_hz       float32 LE, Hz
-28      4     period_us     float32 LE, µs
-32      4     duty_cycle    float32 LE, %
-36      4     rise_time_us  float32 LE, µs (10%→90%)
-40      4     fall_time_us  float32 LE, µs (90%→10%)
-44      1     valid         uint8, 1=measurements valid
-```
+Each channel measurements block occupies **45 bytes**:
+
+| Offset | Byte Count | Data Type | Field Name | Units |
+|:---:|:---:|:---:|:---|:---:|
+| `0` | `4` | `float` | `vpp` | mV |
+| `4` | `4` | `float` | `vrms` | mV |
+| `8` | `4` | `float` | `vdc` | mV |
+| `12`| `4` | `float` | `vac_rms` | mV |
+| `16`| `4` | `float` | `vmax` | mV |
+| `20`| `4` | `float` | `vmin` | mV |
+| `24`| `4` | `float` | `freq` | Hz |
+| `28`| `4` | `float` | `period` | µs |
+| `32`| `4` | `float` | `duty` | % |
+| `36`| `4` | `float` | `rise` | µs |
+| `40`| `4` | `float` | `fall` | µs |
+| `44`| `1` | `uint8` | `valid` | Boolean status |
+
+- **Trailing Checksum**: `uint8` Dallas/Maxim CRC-8.
 
 ---
 
-### INFO Frame (`0x05`)
+### C. PGA Status Frame (`0x08`)
+Transmits the calibration parameters, nominal/effective gains, bandwidths, NVS status, and topology values.
 
-Sent in response to `CMD_GET_CAPS`.
+#### Payload Structure
 
-```
-Offset  Size  Field
-──────  ────  ─────────────────────────────────────────
-0       1     SYNC1 = 0xAA
-1       1     SYNC2 = 0x55
-2       1     FRAME_TYPE = 0x05
-3       1     VERSION_MAJOR
-4       1     VERSION_MINOR
-5       4     MAX_RATE_HZ (uint32 LE)
-9       2     MAX_FRAME_SIZE (uint16 LE, samples)
-11      2     CAPS_FLAGS (uint16 LE, see below)
-13      32    FW_STRING (null-terminated, zero-padded)
-45      1     CRC8
-```
+| Offset | Byte Count | Data Type | Field Name | Description |
+|:---:|:---:|:---:|:---|:---|
+| `0` | `1` | `uint8` | `step` | Active gain step ($0 - 7$) |
+| `1` | `4` | `float` | `vg` | Virtual Ground bias level (mV) |
+| `5` | `1` | `uint8` | `calibrated`| NVS Calibration flag (1 = Calibrated, 0 = Empty) |
+| `6` | `1` | `uint8` | `enabled` | PGA driver power state (1 = Active, 0 = Inactive) |
+| `7` | `32`| `float[8]` | `gain_eff` | Array of computed effective gains per step |
+| `39`| `32`| `float[8]` | `gain_cal` | Array of calibration gain trim scalars per step |
+| `71`| `32`| `float[8]` | `offset` | Array of calibration offsets (mV) per step |
+| `103`| `32`| `float[8]` | `bw` | Array of physical -3dB analog bandwidths (Hz) |
+| `135`| `4` | `float` | `div` | Input attenuator division ratio |
+| `139`| `4` | `float` | `rf` | Feedback resistor $R_f$ value ($\Omega$) |
+| `143`| `12`| `float[3]` | `r_nom` | Resistors $R_1, R_2, R_3$ values ($\Omega$) |
+| `155`| `4` | `float` | `ron` | Internal Switch resistance $R_{on}$ ($\Omega$) |
+| `159`| `4` | `float` | `vg_def` | Default persisted Virtual Ground voltage (mV) |
 
-**CAPS_FLAGS:**
-
-| Bit | Name | Meaning |
-|-----|------|---------|
-| 0 | `DUAL_CHANNEL` | Dual-channel mode supported |
-| 1 | `FFT` | FFT supported |
-| 2 | `OVERSAMPLE` | Oversampling mode supported |
-| 3 | `CLOCK_HACK` | ADC rate > 83333 Hz available |
+- **Trailing Checksum**: `uint8` Dallas/Maxim CRC-8.
 
 ---
 
-### ACK Frame (`0x03`)
+### D. Response Packets (ACK / NAK)
 
-```
-Offset  Size  Field
-──────  ────  ─────────────────────────
-0       1     SYNC1 = 0xAA
-1       1     SYNC2 = 0x55
-2       1     FRAME_TYPE = 0x03
-3       32    CMD_STRING (null-padded, echoes the command)
-35      1     CRC8
-```
+Used to synchronize command handshakes.
+
+- **ACK Packet (`0x0A`)**: Confirm command execution.
+  - Payload: 32 bytes ASCII command echo.
+- **NAK Packet (`0x0B`)**: Command rejected or failed.
+  - Payload: 32 bytes ASCII command echo + 32 bytes ASCII failure description.
 
 ---
 
-### NAK Frame (`0x04`)
+## 🧮 3. CRC-8 Maxim/Dallas Checksum
 
-```
-Offset  Size  Field
-──────  ────  ─────────────────────────
-0       1     SYNC1 = 0xAA
-1       1     SYNC2 = 0x55
-2       1     FRAME_TYPE = 0x04
-3       32    CMD_STRING (null-padded)
-35      32    REASON_STRING (null-padded)
-67      1     CRC8
-```
+To guarantee packet validation, a CRC-8 code is computed using the polynomial $X^8 + X^5 + X^4 + 1$ (Value `0x31`, reversed `0x8C`).
 
----
+> [!IMPORTANT]
+> **CRC lookup optimization**: To avoid high computational loads in the FreeRTOS hot path, a precomputed table lookup is utilized by the firmware.
 
-### FFT Frame (`0x06`)
-
-```
-Offset  Size     Field
-──────  ───────  ─────────────────────────────────────────
-0       1        SYNC1 = 0xAA
-1       1        SYNC2 = 0x55
-2       1        FRAME_TYPE = 0x06
-3       1        FLAGS
-4       2        SEQ_NUM (uint16 LE)
-6       2        FFT_POINTS (uint16 LE, = N/2)
-8       4        BIN_HZ_x100 (uint32 LE, Hz/bin × 100)
-12      N/2 × 4  MAGNITUDES (float32 LE array, mV)
-end     1        CRC8
-```
-
----
-
-## Commands (PC → ESP32)
-
-Commands are **ASCII strings** terminated with `\n` (`0x0A`). Arguments separated by spaces.
-
-**Signal generator notes:**
-- `CMD_GEN_START` type `0` (square): LEDC PWM, 1–150000 Hz.
-- Types `1` (sine), `2` (triangle), `3` (saw): software DDS via portadora PWM 40 kHz, 1–2000 Hz.
-  Requiere filtro RC externo (1kΩ + 100nF) en el pin de salida para eliminar la
-  portadora y obtener la forma de onda analógica. Sin filtro se ve la PWM.
-
-| Command | Arguments | Response | Description |
-|---------|-----------|----------|-------------|
-| `CMD_GET_CAPS` | — | INFO frame + ACK | Query firmware capabilities |
-| `CMD_STREAM_START` | — | ACK | Begin continuous DATA frame stream |
-| `CMD_STREAM_STOP` | — | ACK | Stop stream |
-| `CMD_SINGLE_SHOT` | — | ACK → DATA (on trigger) | Capture one triggered frame |
-| `CMD_SET_MODE` | `<mode>` | ACK | `0`=SINGLE_CH `1`=DUAL_CH `2`=OVERSAMPLE |
-| `CMD_SET_RATE` | `<hz>` | ACK | ADC rate in Hz (611–160000) |
-| `CMD_SET_TRIG` | `<ch> <mv> <edge>` | ACK | ch: 0/1, mv: float, edge: 0=RISE 1=FALL 2=ANY 3=NONE |
-| `CMD_SET_ATTEN` | `<ch> <db>` | ACK | ch: 0/1, db: 0=0dB 1=2.5dB 2=6dB 3=12dB |
-| `CMD_SET_FRAME` | `<n>` | ACK | Frame size: 64/128/256/512/1024/2048/4096 |
-| `CMD_SET_PRE_TRIG` | `<n>` | ACK | Pre-trigger samples (0 to frame_size/2) |
-| `CMD_SET_FFT` | `<en>` | ACK | `0`=disable `1`=enable FFT |
-| `CMD_GEN_START` | `<type> <freq> <duty>` | ACK | Signal gen: type 0=SQ 1=SIN 2=TRI 3=SAW; freq Hz; duty % (1-99, square only) |
-| `CMD_GEN_STOP` | — | ACK | Stop signal generator (pin → LOW) |
-| `CMD_FACTORY_RESET` | — | ACK | Restore defaults and save to NVS |
-| `CMD_GET_STATUS` | — | MEASUREMENTS frame | Get current auto-measurements |
-
----
-
-## Sync Recovery
-
-The receiver must implement **sync byte scanning**:
-
-1. Read bytes one by one until `0xAA` is found.
-2. Check if next byte is `0x55`.
-3. If not, continue scanning from step 1.
-4. Once sync is confirmed, read `FRAME_TYPE`, then the fixed payload for that type.
-5. Validate CRC. On failure, discard and return to step 1.
-
----
-
-## CRC-8 Reference Implementation (Python)
-
-```python
-# Exact table from osc_usb.c — do not regenerate algorithmically
-CRC8_TABLE = [
+```c
+// Precomputed Dallas/Maxim CRC-8 Lookup Table (Poly: 0x31)
+static const uint8_t CRC8_TABLE[256] = {
     0x00,0x5E,0xBC,0xE2,0x61,0x3F,0xDD,0x83,0xC2,0x9C,0x7E,0x20,0xA3,0xFD,0x1F,0x41,
     0x9D,0xC3,0x21,0x7F,0xFC,0xA2,0x40,0x1E,0x5F,0x01,0xE3,0xBD,0x3E,0x60,0x82,0xDC,
     0x23,0x7D,0x9F,0xC1,0x42,0x1C,0xFE,0xA0,0xE1,0xBF,0x5D,0x03,0x80,0xDE,0x3C,0x62,
@@ -247,103 +154,5 @@ CRC8_TABLE = [
     0x57,0x09,0xEB,0xB5,0x36,0x68,0x8A,0xD4,0x95,0xCB,0x29,0x77,0xF4,0xAA,0x48,0x16,
     0xE9,0xB7,0x55,0x0B,0x88,0xD6,0x34,0x6A,0x2B,0x75,0x97,0xC9,0x4A,0x14,0xF6,0xA8,
     0x74,0x2A,0xC8,0x96,0x15,0x4B,0xA9,0xF7,0xB6,0xE8,0x0A,0x54,0xD7,0x89,0x6B,0x35,
-]
-
-def crc8(data: bytes) -> int:
-    crc = 0
-    for b in data:
-        crc = CRC8_TABLE[crc ^ b]
-    return crc
-```
-
----
-
-## PGA Commands
-
-The PGA (Programmable Gain Amplifier) uses a 3-bit binary-weighted Rg ladder with open-drain GPIOs switching resistors R1=36kΩ, R2=9.09kΩ, R3=4.02kΩ. Gain is `1 + Rf/Rg_parallel` with Rf=36kΩ. An input voltage divider (100kΩ/1MΩ = 0.090909) sits before the op-amp non-inverting input.
-
-**All hardware parameters (divider ratio, resistor values, GPIO Ron) are configurable via USB commands and persisted in NVS.**
-
-### Frame Types
-
-| Byte | Name | Direction | Description |
-|------|------|-----------|-------------|
-| `0x08` | PGA_INFO | ESP32 → PC | PGA calibration and hardware info |
-
-### PGA_INFO Frame (`0x08`)
-
-167 bytes total. Sent in response to `CMD_PGA_GET_INFO` and after `CMD_PGA_CAL_START`, `CMD_PGA_SET_HARDWARE`, `CMD_PGA_CAL_RESET`.
-
-```
-Offset  Size  Field
-──────  ────  ─────────────────────────────────────────────────────────
-0       1     SYNC1 = 0xAA
-1       1     SYNC2 = 0x55
-2       1     FRAME_TYPE = 0x08
-3       1     STEP (uint8, 0-7, current gain step)
-
-4       4     VG_MV (float32 LE, measured virtual ground in mV)
-8       1     CALIBRATED (uint8, 0=not cal, 1=calibrated)
-9       1     ENABLED (uint8, 0=PGA disabled via UI, 1=enabled)
-
-10      32    GAIN_NOMINAL[8] (8 × float32 LE, ideal gain from resistors)
-42      32    GAIN_CAL_FACTOR[8] (8 × float32 LE, per-step trim near 1.0)
-74      32    OFFSET_CAL_MV[8] (8 × float32 LE, per-step DC offset)
-106     32    BW_HZ[8] (8 × float32 LE, bandwidth per step)
-
-138     4     DIV_RATIO (float32 LE, input divider ratio)
-142     4     R_FB_OHM (float32 LE, Rf feedback resistor value in Ω)
-146     4     R_NOM_OHM[0] (float32 LE, R1 value in Ω)
-150     4     R_NOM_OHM[1] (float32 LE, R2 value in Ω)
-154     4     R_NOM_OHM[2] (float32 LE, R3 value in Ω)
-158     4     GPIO_RON_OHM (float32 LE, GPIO on-resistance in Ω)
-162     4     VG_DEFAULT_MV (float32 LE, stored default VG for factory reset)
-166     1     CRC8
-```
-
-**Voltage reconstruction formula (both firmware and PC app):**
-```
-v_input_mv = (v_adc_mv - VG - offset_cal[step]) / (gain_nominal[step] * gain_cal_factor[step]) / div_ratio
-```
-
-### PGA Command Table
-
-| Command | Arguments | Response | Description |
-|---------|-----------|----------|-------------|
-| `CMD_PGA_SET_STEP` | `<0-7>` | ACK | Select gain step (applies GPIO mask) |
-| `CMD_PGA_CAL_START` | — | ACK + PGA_INFO | Auto-calibration: measure VG and offsets. Input must be grounded. |
-| `CMD_PGA_CAL_SET_VG` | `<mv_float>` | ACK | Set virtual ground manually (100-3000 mV) |
-| `CMD_PGA_CAL_SET_GAIN` | `<step> <factor_float>` | ACK | Set per-step gain trim factor (0.5-2.0, near 1.0) |
-| `CMD_PGA_CAL_SET_OFF` | `<step> <offset_mv_float>` | ACK | Set per-step offset correction (-500 to +500 mV) |
-| `CMD_PGA_CAL_SAVE` | — | ACK | Persist all calibration to NVS |
-| `CMD_PGA_CAL_RESET` | — | ACK + PGA_INFO | Reset calibration to defaults (VG→vg_default, trims→1.0, offsets→0) |
-| `CMD_PGA_GET_INFO` | — | ACK + PGA_INFO | Query full PGA status |
-| `CMD_PGA_SET_HARDWARE` | `<div_ratio> <rf> <r1> <r2> <r3> <ron>` | ACK + PGA_INFO | Set all hardware topology parameters. div_ratio 0.01-1.0, resistors 100-100000 Ω, ron 0-500 Ω. |
-| `CMD_PGA_SET_DEFAULT_VG` | `<mv_float>` | ACK | Persist VG default (used by CMD_PGA_CAL_RESET) |
-| `CMD_PGA_SET_ENABLED` | `<0\|1>` | ACK | Enable/disable PGA flag in config (does not affect hardware) |
-
-### CMD_PGA_SET_HARDWARE Example
-
-```
-CMD_PGA_SET_HARDWARE 0.090909 36000 36000 9090 4020 50
-```
-
-This sets the factory-default topology:
-- Divider ratio = 0.090909 (100k / 1.1M)
-- Rf = 36000 Ω
-- R1 = 36000 Ω (bit 0)
-- R2 = 9090 Ω (bit 1)
-- R3 = 4020 Ω (bit 2)
-- GPIO Ron = 50 Ω
-
-### Auto-Calibration Sequence
-
-1. Ground the BNC input (0V)
-2. Send `CMD_PGA_CAL_START`
-3. Firmware sets step 0 (gain=1), measures VG
-4. Firmware iterates steps 1-7, measures DC offset at each gain
-5. All gain trim factors remain at 1.0
-6. On success: saves to NVS, sends PGA_INFO
-7. On fault (VG outside 500-2500mV range): NAK with failure reason
-
+};
 ```
