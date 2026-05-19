@@ -98,6 +98,15 @@ void osc_adc_reset_overflow_count(void);
  */
 int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms);
 
+/**
+ * @brief Update the ADC non-linearity correction factor at runtime.
+ *        This only changes a scalar used in raw_to_mv10() — it does NOT
+ *        reconfigure the ADC hardware or DMA, so it is safe to call from
+ *        any task context at any time.
+ * @param factor Correction multiplier (typically 1.0 to 1.1)
+ */
+void osc_adc_set_correction_factor(float factor);
+
 #ifdef __cplusplus
 }
 #endif

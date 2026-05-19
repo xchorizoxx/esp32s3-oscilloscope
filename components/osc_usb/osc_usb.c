@@ -275,7 +275,14 @@ static void process_command(const char *cmd)
         float factor = 0;
         if (sscanf(cmd + strlen(OSC_CMD_ADC_SET_CORRECTION), " %f", &factor) == 1) {
             if (osc_config_set_adc_correction(factor) == ESP_OK) {
-                osc_adc_reconfigure();
+                /* FW-CRASH-FIX: DO NOT call osc_adc_reconfigure() here!
+                 * The correction factor is a simple scalar applied during
+                 * raw_to_mv10() conversion — it does NOT require destroying
+                 * and re-creating the ADC DMA driver.  Calling reconfigure()
+                 * from the cmd_task on Core 0 while adc_capture_task on
+                 * Core 1 is actively reading causes a crash in
+                 * adc_continuous_stop(). */
+                osc_adc_set_correction_factor(factor);
                 osc_usb_send_ack(cmd);
             } else {
                 osc_usb_send_nak(cmd, "factor out of range (1.0-1.1)");

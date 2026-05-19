@@ -462,5 +462,15 @@ int16_t osc_adc_read_mean_mv10(uint8_t ch_idx, uint32_t timeout_ms)
 }
 
 void *osc_adc_get_handle(void) { return s_adc_handle; }
+
+/* --------------------------------------------------------------------------
+ * Set ADC correction factor at runtime (does NOT require ADC reconfiguration).
+ * The factor is a simple scalar applied during raw_to_mv10() conversion.
+ * Thread-safe: float store is atomic on Xtensa (32-bit aligned).
+ * -------------------------------------------------------------------------- */
+void osc_adc_set_correction_factor(float factor) {
+    s_adc_correction_factor = factor;
+    ESP_LOGI(TAG, "ADC correction factor set to %.6f", factor);
+}
 uint32_t osc_adc_get_overflow_count(void) { return s_overflow_count; }
 void osc_adc_reset_overflow_count(void) { s_overflow_count = 0; }
